@@ -1,0 +1,90 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "entry": ["src/index.ts"],
+  "typeAware": {
+    "enabled": true,
+    "projects": ["tsconfig.json"],
+    "require": "best-effort"
+  },
+  "boundaries": {
+    "zones": [
+      { "name": "domain", "patterns": ["src/domain/**"] },
+      { "name": "application", "patterns": ["src/application/**"] },
+      { "name": "adapters", "patterns": ["src/adapters/**"] },
+      { "name": "entrypoints", "patterns": ["src/entrypoints/**"] },
+      {
+        "name": "composition",
+        "patterns": ["src/bootstrap.ts", "src/index.ts"]
+      },
+      { "name": "tests", "patterns": ["test/**"] },
+      { "name": "tooling", "patterns": ["vitest.config.ts"] }
+    ],
+    "rules": [
+      { "from": "domain", "allow": ["domain"] },
+      {
+        "from": "application",
+        "allow": ["domain", "application"]
+      },
+      {
+        "from": "adapters",
+        "allow": ["domain", "application", "adapters"]
+      },
+      {
+        "from": "entrypoints",
+        "allow": ["domain", "application", "entrypoints"]
+      },
+      {
+        "from": "composition",
+        "allow": [
+          "domain",
+          "application",
+          "adapters",
+          "entrypoints",
+          "composition"
+        ]
+      },
+      {
+        "from": "tests",
+        "allow": [
+          "domain",
+          "application",
+          "adapters",
+          "entrypoints",
+          "composition",
+          "tests"
+        ]
+      },
+      {
+        "from": "tooling",
+        "allow": [
+          "domain",
+          "application",
+          "adapters",
+          "entrypoints",
+          "composition",
+          "tooling"
+        ]
+      }
+    ],
+    "coverage": {
+      "requireAllFiles": true,
+      "allowUnmatched": []
+    }
+  },
+  "duplicates": {
+    "enabled": true,
+    "mode": "mild",
+    "minTokens": 50,
+    "minLines": 5,
+    "minOccurrences": 2,
+    "ignoreImports": true
+  },
+  "rules": {
+    "private-type-leaks": "warn",
+    "require-suppression-reason": "warn"
+  },
+  "audit": {
+    "gate": "new-only",
+    "typeAware": true
+  }
+}
