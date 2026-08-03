@@ -1,0 +1,46 @@
+{
+  "name": "pi-session-hoarder",
+  "version": "0.1.0",
+  "description": "🐿️ A Pi extension that archives sessions into local content-addressed storage.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moyai-ai/pi-session-hoarder.git"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "analyze": "fallow --type-aware",
+    "analyze:check": "fallow dead-code --type-aware --fail-on-issues",
+    "analyze:audit": "fallow audit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run analyze:check && npm test",
+    "prepublishOnly": "npm run check"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@types/node": "24.12.4",
+    "fallow": "3.12.0",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

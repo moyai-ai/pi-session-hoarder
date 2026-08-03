@@ -1,2 +1,29 @@
-docs/
+# Internal project documentation
 AGENTS.md
+docs/
+
+# Dependencies
+node_modules/
+
+# Build, test, and analysis output
+.fallow/
+coverage/
+
+# Local scratch scripts
+/scratch/
+*.tsbuildinfo
+*.log
+*.tgz
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.npmrc
+
+# Project-local Pi test installation and archived sessions
+/.pi/settings.json
+/.pi/session-hoarder/
+
+# Operating system files
+.DS_Store
