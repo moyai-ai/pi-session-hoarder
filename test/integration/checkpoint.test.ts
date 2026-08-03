@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createLocalCheckpointApplication } from "../../src/bootstrap.js";
-import { LocalSessionArchiveRepository } from "../../src/adapters/filesystem/local-unit-of-work.js";
+import { LocalSessionArchiveRepository } from "../../src/adapters/filesystem/local-session-archive-repository.js";
 
 const temporaryDirectories: string[] = [];
 

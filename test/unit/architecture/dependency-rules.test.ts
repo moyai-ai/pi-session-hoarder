@@ -50,4 +50,15 @@ describe("architectural dependency rules", () => {
 
     expect(forbidden).toEqual([]);
   });
+
+  it("keeps active session state independent of the Pi host API", async () => {
+    const imports = await importsUnder("src/entrypoints");
+    const forbidden = imports.filter(
+      ({ path, source }) =>
+        path.endsWith("active-session.ts") &&
+        source === "@earendil-works/pi-coding-agent",
+    );
+
+    expect(forbidden).toEqual([]);
+  });
 });

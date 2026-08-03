@@ -13,6 +13,7 @@ import type {
   SourceBoundary,
 } from "../../../src/application/ports.js";
 import { SessionArchive, type ObjectReference } from "../../../src/domain/model.js";
+import { Failpoints } from "../../support/failpoints.js";
 
 class FakeArchiveRepository implements SessionArchiveRepository {
   stored?: SessionArchive;
@@ -31,6 +32,8 @@ class FakeObjectStore implements ObjectStore {
   readonly paths = new Map<string, ObjectReference>();
   readonly available = new Set<string>();
 
+  constructor(private readonly failpoints: Failpoints) {}
+
   addPath(path: string, contents: string): ObjectReference {
     const digest = createHash("sha256").update(contents).digest("hex");
     const object: ObjectReference = {
@@ -46,6 +49,7 @@ class FakeObjectStore implements ObjectStore {
   }
 
   async putFile(path: string) {
+    this.failpoints.hit(`object:put:${path}`);
     const object = this.paths.get(path);
     if (!object) throw new Error(`missing fake path ${path}`);
     this.available.add(object.digest);
@@ -57,6 +61,7 @@ class FakeObjectStore implements ObjectStore {
   }
 
   async verify(object: ObjectReference) {
+    this.failpoints.hit("object:verify");
     return { valid: this.available.has(object.digest), digest: object.digest, logicalBytes: object.logicalBytes };
   }
 }
@@ -69,9 +74,11 @@ class FakeUnitOfWork implements CheckpointUnitOfWork {
   constructor(
     readonly archives: FakeArchiveRepository,
     readonly objects: FakeObjectStore,
+    private readonly failpoints: Failpoints,
   ) {}
 
   async commit(): Promise<void> {
+    this.failpoints.hit("uow:commit");
     if (!this.archives.staged) throw new Error("nothing staged");
     this.archives.stored = this.archives.staged;
     this.archives.staged = undefined;
@@ -90,11 +97,15 @@ class FakeUnitOfWork implements CheckpointUnitOfWork {
 
 class FakeUnitOfWorkFactory implements CheckpointUnitOfWorkFactory {
   readonly archives = new FakeArchiveRepository();
-  readonly objects = new FakeObjectStore();
+  readonly objects: FakeObjectStore;
   created: FakeUnitOfWork[] = [];
 
+  constructor(private readonly failpoints: Failpoints) {
+    this.objects = new FakeObjectStore(failpoints);
+  }
+
   create(): CheckpointUnitOfWork {
-    const uow = new FakeUnitOfWork(this.archives, this.objects);
+    const uow = new FakeUnitOfWork(this.archives, this.objects, this.failpoints);
     this.created.push(uow);
     return uow;
   }
@@ -104,7 +115,10 @@ class FakeSnapshotter implements SessionSnapshotter {
   boundary?: SourceBoundary = { size: 100, mtimeMs: 1 };
   disposed = false;
 
+  constructor(private readonly failpoints: Failpoints) {}
+
   async inspect(): Promise<SourceBoundary | undefined> {
+    this.failpoints.hit("snapshot:inspect");
     return this.boundary;
   }
 
@@ -112,20 +126,25 @@ class FakeSnapshotter implements SessionSnapshotter {
     _sourcePath: string,
     boundary: SourceBoundary,
   ): Promise<CapturedSessionSnapshot> {
+    this.failpoints.hit("snapshot:capture");
     return {
       path: "snapshot",
       sourcePath: "session",
       ...boundary,
       dispose: async () => {
+        this.failpoints.hit("snapshot:dispose");
         this.disposed = true;
       },
     };
   }
 }
 
-function setup(artifactDiscovery: ArtifactDiscovery = { discover: async () => [] }) {
-  const unitOfWorkFactory = new FakeUnitOfWorkFactory();
-  const snapshotter = new FakeSnapshotter();
+function setup(
+  artifactDiscovery: ArtifactDiscovery = { discover: async () => [] },
+  failpoints = new Failpoints(),
+) {
+  const unitOfWorkFactory = new FakeUnitOfWorkFactory(failpoints);
+  const snapshotter = new FakeSnapshotter(failpoints);
   unitOfWorkFactory.objects.addPath("snapshot", "session bytes");
   const service = new CheckpointApplicationService({
     unitOfWorkFactory,
@@ -133,7 +152,7 @@ function setup(artifactDiscovery: ArtifactDiscovery = { discover: async () => []
     artifactDiscovery,
     clock: { now: () => new Date("2026-08-03T12:00:00.000Z") },
   });
-  return { service, unitOfWorkFactory, snapshotter };
+  return { service, unitOfWorkFactory, snapshotter, failpoints };
 }
 
 const command = { repositoryId: "repo", sessionId: "session", sessionFile: "session" };
@@ -210,5 +229,39 @@ describe("checkpoint application service", () => {
     await expect(service.checkpoint(command)).rejects.toThrow("corrupt session");
     expect(unitOfWorkFactory.created[0]).toMatchObject({ rolledBack: true, disposed: true });
     expect(unitOfWorkFactory.archives.stored).toBeUndefined();
+  });
+
+  it.each([
+    "snapshot:inspect",
+    "snapshot:capture",
+    "artifact:discover",
+    "object:put:snapshot",
+    "object:verify",
+    "uow:commit",
+  ])("preserves aggregate invisibility after an injected %s failure", async (phase) => {
+    const failpoints = new Failpoints();
+    const discovery: ArtifactDiscovery = {
+      discover: async () => {
+        failpoints.hit("artifact:discover");
+        return [];
+      },
+    };
+    const { service, unitOfWorkFactory } = setup(discovery, failpoints);
+    failpoints.arm(phase);
+
+    await expect(service.checkpoint(command)).rejects.toThrow(`Injected failure at ${phase}`);
+    expect(unitOfWorkFactory.created[0]).toMatchObject({ rolledBack: true, disposed: true });
+    expect(unitOfWorkFactory.archives.stored).toBeUndefined();
+  });
+
+  it("disposes the Unit of Work even when snapshot cleanup fails", async () => {
+    const failpoints = new Failpoints();
+    const { service, unitOfWorkFactory } = setup(undefined, failpoints);
+    failpoints.arm("snapshot:dispose");
+
+    await expect(service.checkpoint(command)).rejects.toThrow(
+      "Injected failure at snapshot:dispose",
+    );
+    expect(unitOfWorkFactory.created[0]).toMatchObject({ committed: true, disposed: true });
   });
 });

@@ -20,10 +20,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "analyze": "fallow --type-aware",
-    "analyze:check": "fallow dead-code --type-aware --fail-on-issues",
+    "analyze:check": "fallow --type-aware --fail-on-issues",
     "analyze:audit": "fallow audit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run analyze:check && npm test",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run typecheck && npm run test:coverage && npm run analyze:check",
     "prepublishOnly": "npm run check"
   },
   "pi": {
@@ -38,6 +39,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.83.0",
     "@types/node": "24.12.4",
+    "@vitest/coverage-istanbul": "4.1.9",
     "fallow": "3.12.0",
     "typebox": "1.3.7",
     "typescript": "5.9.3",

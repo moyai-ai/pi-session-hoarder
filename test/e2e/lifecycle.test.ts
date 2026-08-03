@@ -95,6 +95,7 @@ async function invoke(handler: Handler | undefined, event: unknown, ctx: Extensi
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -163,8 +164,9 @@ describe("HoarderLifecycle", () => {
     expect(setStatus).toHaveBeenLastCalledWith("session-hoarder", "◇hoard");
   });
 
-  it("stops a running spinner when a replacement session displaces its runtime", async () => {
+  it("disposes a displaced runtime and stops its running spinner", async () => {
     const { directory, dependencies, uiScheduler } = await fixture();
+    const dispose = vi.spyOn(CheckpointCoordinator.prototype, "dispose");
     const sessionFile = join(directory, "session.jsonl");
     await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: "first" })}\n`);
     dependencies.createCheckpointService = () => ({
@@ -181,6 +183,7 @@ describe("HoarderLifecycle", () => {
     const oldStatusCalls = first.setStatus.mock.calls.length;
 
     await invoke(handlers.get("session_start"), { reason: "resume" }, replacement.context);
+    expect(dispose).toHaveBeenCalledTimes(1);
     expect(uiScheduler.activeCount).toBe(0);
     uiScheduler.tick();
 

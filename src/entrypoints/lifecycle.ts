@@ -8,39 +8,16 @@ import type {
   CheckpointApplicationService,
   CheckpointSessionResult,
 } from "../application/checkpoint-service.js";
-import type {
-  ConfigLoadResult,
-  HoarderConfig,
-} from "../application/configuration.js";
-import type {
-  CheckpointStatus,
-  RepositoryIdentity,
-  SessionArchiveRecord,
-} from "../domain/model.js";
-import { formatFooterStatus, type HoarderStatusSnapshot } from "../application/status.js";
+import type { ConfigLoadResult } from "../application/configuration.js";
+import type { HoarderStatusSnapshot } from "../application/status.js";
+import type { RepositoryIdentity } from "../domain/model.js";
+import {
+  ActiveSession,
+  type ActiveSessionHost,
+  type UiScheduler,
+} from "./active-session.js";
 
-interface SessionRuntime {
-  key: string;
-  generation: number;
-  sessionId: string;
-  repository: RepositoryIdentity;
-  sessionFile?: string;
-  config?: HoarderConfig;
-  checkpoint: CheckpointStatus;
-  record?: SessionArchiveRecord;
-  initializationError?: string;
-  coordinator?: CheckpointCoordinator;
-  spinnerHandle?: unknown;
-  spinnerFrame: number;
-}
-
-export interface UiScheduler {
-  setInterval(callback: () => void, intervalMs: number): unknown;
-  clearInterval(handle: unknown): void;
-}
-
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-const SPINNER_INTERVAL_MS = 200;
+export type { UiScheduler } from "./active-session.js";
 
 export interface HoarderController {
   getStatusSnapshot(): HoarderStatusSnapshot;
@@ -61,7 +38,7 @@ export interface LifecycleDependencies {
 /** Pi lifecycle entrypoint. It translates Pi events into application use cases only. */
 export class HoarderLifecycle implements HoarderController {
   private readonly dependencies: LifecycleDependencies;
-  private readonly runtimes = new Map<string, SessionRuntime>();
+  private readonly runtimes = new Map<string, ActiveSession>();
   private currentKey?: string;
   private generation = 0;
 
@@ -90,16 +67,9 @@ export class HoarderLifecycle implements HoarderController {
   }
 
   getStatusSnapshot(): HoarderStatusSnapshot {
-    const runtime = this.currentRuntime();
-    if (!runtime) return { checkpoint: { state: "disabled", reason: "no active session" } };
-    return structuredClone({
-      sessionId: runtime.sessionId,
-      repositoryId: runtime.repository.repositoryId,
-      config: runtime.config,
-      checkpoint: runtime.checkpoint,
-      record: runtime.record,
-      initializationError: runtime.initializationError,
-    });
+    return this.currentRuntime()?.snapshot() ?? {
+      checkpoint: { state: "disabled", reason: "no active session" },
+    };
   }
 
   async sync(expectedSessionId?: string): Promise<CheckpointSessionResult | undefined> {
@@ -115,97 +85,116 @@ export class HoarderLifecycle implements HoarderController {
   }
 
   private async startSession(ctx: ExtensionContext): Promise<void> {
-    const previousRuntime = this.currentRuntime();
-    if (previousRuntime) this.stopSpinner(previousRuntime);
-    const generation = ++this.generation;
-    const sessionId = ctx.sessionManager.getSessionId();
-    const runtime: SessionRuntime = {
-      key: `initializing:${sessionId}:${generation}`,
-      generation,
-      sessionId,
-      repository: { kind: "cwd", canonicalValue: ctx.cwd, repositoryId: "initializing" },
-      sessionFile: ctx.sessionManager.getSessionFile(),
-      checkpoint: { state: "pending", dirtyReasons: ["initializing"] },
-      spinnerFrame: 0,
-    };
+    this.retireCurrentRuntime();
+    const runtime = this.createRuntime(ctx);
     this.runtimes.set(runtime.key, runtime);
     this.currentKey = runtime.key;
-    this.updateUi(runtime, ctx);
+    runtime.updateUi();
+    await this.initializeRuntime(runtime);
+  }
 
+  private retireCurrentRuntime(): void {
+    const runtime = this.currentRuntime();
+    if (!runtime) return;
+    runtime.coordinator?.dispose();
+    runtime.stopUi();
+    this.runtimes.delete(runtime.key);
+    this.currentKey = undefined;
+  }
+
+  private createRuntime(ctx: ExtensionContext): ActiveSession {
+    const generation = ++this.generation;
+    let runtime!: ActiveSession;
+    runtime = new ActiveSession(
+      createActiveSessionHost(ctx),
+      generation,
+      this.dependencies.uiScheduler,
+      () => this.isRuntimeCurrent(runtime),
+    );
+    return runtime;
+  }
+
+  private async initializeRuntime(runtime: ActiveSession): Promise<void> {
     try {
       const configResult = await this.dependencies.loadConfiguration({
-        cwd: ctx.cwd,
-        isProjectTrusted: ctx.isProjectTrusted(),
+        cwd: runtime.cwd,
+        isProjectTrusted: runtime.isProjectTrusted,
       });
       runtime.config = configResult.config;
       if (!configResult.ok) {
-        this.disableForConfigError(runtime, configResult);
-        this.updateUi(runtime, ctx);
+        runtime.failConfiguration(configResult);
+        runtime.updateUi();
         return;
       }
       if (!configResult.config.enabled) {
         runtime.checkpoint = { state: "disabled", reason: "disabled by configuration" };
-        this.updateUi(runtime, ctx);
+        runtime.updateUi();
         return;
       }
       if (!runtime.sessionFile) {
         runtime.checkpoint = { state: "disabled", reason: "ephemeral Pi session" };
-        this.updateUi(runtime, ctx);
+        runtime.updateUi();
         return;
       }
 
-      const repository = await this.dependencies.resolveRepository(ctx.cwd);
-      if (!this.isGenerationCurrent(generation)) return;
-      runtime.repository = repository;
-      const key = `${repository.repositoryId}:${sessionId}`;
-      this.runtimes.delete(runtime.key);
-      runtime.key = key;
-      this.runtimes.set(key, runtime);
-      this.currentKey = key;
-
-      const checkpointService = this.dependencies.createCheckpointService(
-        configResult.config.storageRoot,
-      );
-      runtime.checkpoint = { state: "idle" };
-      runtime.coordinator = this.dependencies.createCoordinator({
-        debounceMs: configResult.config.debounceMs,
-        shutdownTimeoutMs: configResult.config.shutdownTimeoutMs,
-        isCurrent: () => this.isRuntimeCurrent(runtime),
-        onStatus: (status) => {
-          runtime.checkpoint = status;
-          this.updateUi(runtime, ctx);
-        },
-        runner: {
-          run: async (_reasons, signal) => {
-            const result = await checkpointService.checkpoint(
-              {
-                repositoryId: repository.repositoryId,
-                sessionId,
-                sessionFile: runtime.sessionFile!,
-              },
-              signal,
-            );
-            if (result && this.isRuntimeCurrent(runtime)) runtime.record = result.record;
-            return result;
-          },
-        },
-      });
-      this.updateUi(runtime, ctx);
-      void runtime.coordinator.flush("startup-recovery");
+      const repository = await this.dependencies.resolveRepository(runtime.cwd);
+      if (!this.isGenerationCurrent(runtime.generation)) return;
+      this.activateRuntime(runtime, repository, configResult.config.storageRoot);
     } catch (error) {
-      if (!this.isGenerationCurrent(generation)) return;
-      runtime.initializationError = errorMessage(error);
-      runtime.checkpoint = {
-        state: "error",
-        error: {
-          code: "INITIALIZATION_FAILED",
-          message: runtime.initializationError,
-          occurredAt: new Date().toISOString(),
-          retryable: true,
-        },
-      };
-      this.updateUi(runtime, ctx);
+      if (!this.isGenerationCurrent(runtime.generation)) return;
+      runtime.failInitialization(error);
+      runtime.updateUi();
     }
+  }
+
+  private activateRuntime(
+    runtime: ActiveSession,
+    repository: RepositoryIdentity,
+    storageRoot: string,
+  ): void {
+    this.rekeyRuntime(runtime, repository);
+    const checkpointService = this.dependencies.createCheckpointService(storageRoot);
+    runtime.checkpoint = { state: "idle" };
+    runtime.coordinator = this.createCoordinator(runtime, checkpointService);
+    runtime.updateUi();
+    void runtime.coordinator.flush("startup-recovery");
+  }
+
+  private rekeyRuntime(runtime: ActiveSession, repository: RepositoryIdentity): void {
+    this.runtimes.delete(runtime.key);
+    runtime.repository = repository;
+    runtime.key = `${repository.repositoryId}:${runtime.sessionId}`;
+    this.runtimes.set(runtime.key, runtime);
+    this.currentKey = runtime.key;
+  }
+
+  private createCoordinator(
+    runtime: ActiveSession,
+    checkpointService: CheckpointApplicationService,
+  ): CheckpointCoordinator {
+    return this.dependencies.createCoordinator({
+      debounceMs: runtime.config!.debounceMs,
+      shutdownTimeoutMs: runtime.config!.shutdownTimeoutMs,
+      isCurrent: () => this.isRuntimeCurrent(runtime),
+      onStatus: (status) => {
+        runtime.checkpoint = status;
+        runtime.updateUi();
+      },
+      runner: {
+        run: async (_reasons, signal) => {
+          const result = await checkpointService.checkpoint(
+            {
+              repositoryId: runtime.repository.repositoryId,
+              sessionId: runtime.sessionId,
+              sessionFile: runtime.sessionFile!,
+            },
+            signal,
+          );
+          if (result && this.isRuntimeCurrent(runtime)) runtime.record = result.record;
+          return result;
+        },
+      },
+    });
   }
 
   private async stopSession(ctx: ExtensionContext): Promise<void> {
@@ -213,42 +202,25 @@ export class HoarderLifecycle implements HoarderController {
     if (!runtime) return;
     await runtime.coordinator?.shutdown("shutdown");
     runtime.coordinator?.dispose();
-    this.stopSpinner(runtime);
+    runtime.stopUi();
     this.runtimes.delete(runtime.key);
-    if (this.currentKey === runtime.key) {
-      this.currentKey = undefined;
-      this.generation += 1;
-      if (ctx.hasUI) ctx.ui.setStatus("session-hoarder", undefined);
-    }
+    if (this.currentKey !== runtime.key) return;
+    this.currentKey = undefined;
+    this.generation += 1;
+    runtime.clearUi();
   }
 
-  private disableForConfigError(
-    runtime: SessionRuntime,
-    result: Extract<ConfigLoadResult, { ok: false }>,
-  ): void {
-    runtime.initializationError = result.error.message;
-    runtime.checkpoint = {
-      state: "error",
-      error: {
-        code: `CONFIG_${result.error.kind.toUpperCase()}`,
-        message: result.error.message,
-        occurredAt: new Date().toISOString(),
-        retryable: true,
-      },
-    };
-  }
-
-  private withCurrent(ctx: ExtensionContext, action: (runtime: SessionRuntime) => void): void {
+  private withCurrent(ctx: ExtensionContext, action: (runtime: ActiveSession) => void): void {
     const runtime = this.runtimeForContext(ctx);
     if (runtime && this.isRuntimeCurrent(runtime)) action(runtime);
   }
 
-  private runtimeForContext(ctx: ExtensionContext): SessionRuntime | undefined {
+  private runtimeForContext(ctx: ExtensionContext): ActiveSession | undefined {
     const current = this.currentRuntime();
     return current?.sessionId === ctx.sessionManager.getSessionId() ? current : undefined;
   }
 
-  private currentRuntime(): SessionRuntime | undefined {
+  private currentRuntime(): ActiveSession | undefined {
     return this.currentKey ? this.runtimes.get(this.currentKey) : undefined;
   }
 
@@ -256,50 +228,21 @@ export class HoarderLifecycle implements HoarderController {
     return this.generation === generation;
   }
 
-  private isRuntimeCurrent(runtime: SessionRuntime): boolean {
+  private isRuntimeCurrent(runtime: ActiveSession): boolean {
     return this.currentKey === runtime.key && this.generation === runtime.generation;
-  }
-
-  private updateUi(runtime: SessionRuntime, ctx: ExtensionContext): void {
-    if (!ctx.hasUI || !this.isRuntimeCurrent(runtime)) {
-      this.stopSpinner(runtime);
-      return;
-    }
-    if (runtime.checkpoint.state === "running") {
-      this.startSpinner(runtime, ctx);
-    } else {
-      this.stopSpinner(runtime);
-    }
-    this.renderStatus(runtime, ctx);
-  }
-
-  private startSpinner(runtime: SessionRuntime, ctx: ExtensionContext): void {
-    if (runtime.spinnerHandle !== undefined) return;
-    runtime.spinnerFrame = 0;
-    runtime.spinnerHandle = this.dependencies.uiScheduler.setInterval(() => {
-      if (!this.isRuntimeCurrent(runtime) || runtime.checkpoint.state !== "running") {
-        this.stopSpinner(runtime);
-        return;
-      }
-      runtime.spinnerFrame = (runtime.spinnerFrame + 1) % SPINNER_FRAMES.length;
-      this.renderStatus(runtime, ctx);
-    }, SPINNER_INTERVAL_MS);
-  }
-
-  private stopSpinner(runtime: SessionRuntime): void {
-    if (runtime.spinnerHandle === undefined) return;
-    this.dependencies.uiScheduler.clearInterval(runtime.spinnerHandle);
-    runtime.spinnerHandle = undefined;
-    runtime.spinnerFrame = 0;
-  }
-
-  private renderStatus(runtime: SessionRuntime, ctx: ExtensionContext): void {
-    const frame = SPINNER_FRAMES[runtime.spinnerFrame] ?? SPINNER_FRAMES[0];
-    const status = formatFooterStatus(this.getStatusSnapshot(), frame);
-    ctx.ui.setStatus("session-hoarder", ctx.ui.theme.fg("dim", status));
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function createActiveSessionHost(ctx: ExtensionContext): ActiveSessionHost {
+  return {
+    cwd: ctx.cwd,
+    sessionId: ctx.sessionManager.getSessionId(),
+    sessionFile: ctx.sessionManager.getSessionFile(),
+    isProjectTrusted: ctx.isProjectTrusted(),
+    hasUi: ctx.hasUI,
+    renderStatus: (status) => {
+      ctx.ui.setStatus("session-hoarder", ctx.ui.theme.fg("dim", status));
+    },
+    clearStatus: () => ctx.ui.setStatus("session-hoarder", undefined),
+  };
 }

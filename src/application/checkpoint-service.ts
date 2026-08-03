@@ -45,6 +45,7 @@ export class CheckpointApplicationService {
     signal?.throwIfAborted();
     const uow = this.dependencies.unitOfWorkFactory.create();
     let snapshot: Awaited<ReturnType<SessionSnapshotter["capture"]>> | undefined;
+    let operationFailed = false;
 
     try {
       const identity = {
@@ -87,13 +88,26 @@ export class CheckpointApplicationService {
       await uow.commit();
       return { changed: true, record };
     } catch (error) {
+      operationFailed = true;
       await uow.rollback();
       throw error;
     } finally {
-      await snapshot?.dispose();
-      await uow.dispose();
+      await disposeResources(snapshot, uow, operationFailed);
     }
   }
+}
+
+async function disposeResources(
+  snapshot: Awaited<ReturnType<SessionSnapshotter["capture"]>> | undefined,
+  uow: CheckpointUnitOfWork,
+  suppressErrors: boolean,
+): Promise<void> {
+  const results = await Promise.allSettled([snapshot?.dispose(), uow.dispose()]);
+  if (suppressErrors) return;
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
 }
 
 async function captureArtifacts(
