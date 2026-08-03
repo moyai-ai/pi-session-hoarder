@@ -9,6 +9,7 @@ import { Writable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { LocalFileObjectStore } from "../../../src/adapters/filesystem/local-object-store.js";
+import { objectStoreContract } from "../../contracts/object-store.contract.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -35,6 +36,17 @@ async function decodedBytes(
   for await (const chunk of cas.openDecoded(object)) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks);
 }
+
+objectStoreContract("LocalFileObjectStore", async () => {
+  const { source, cas } = await fixture();
+  return {
+    store: cas,
+    writeSource: async (contents) => {
+      await writeFile(source, contents);
+      return source;
+    },
+  };
+});
 
 describe("LocalFileObjectStore", () => {
   it.each([

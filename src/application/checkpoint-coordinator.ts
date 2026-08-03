@@ -117,32 +117,29 @@ export class CheckpointCoordinator {
     while (!this.disposed && this.dirtyReasons.size > 0) {
       const reasons = [...this.dirtyReasons];
       this.dirtyReasons.clear();
-      this.publish({ state: "running", startedAt: this.now().toISOString() });
-      try {
-        latest = await this.runner.run(reasons, this.abortController.signal);
-        this.publish(
-          latest
-            ? {
-                state: "idle",
-                revision: latest.record.revision,
-                lastSuccessAt: latest.record.capturedAt,
-              }
-            : { state: "idle" },
-        );
-      } catch (error) {
-        if (this.abortController.signal.aborted || this.disposed) return latest;
-        for (const reason of reasons) this.dirtyReasons.add(reason);
-        const checkpointError: CheckpointError = {
-          code: errorCode(error),
-          message: errorMessage(error),
-          occurredAt: this.now().toISOString(),
-          retryable: true,
-        };
-        this.publish({ state: "error", error: checkpointError });
-        return latest;
-      }
+      const outcome = await this.runCheckpoint(reasons);
+      latest = outcome.result;
+      if (outcome.stop) return latest;
     }
     return latest;
+  }
+
+  private async runCheckpoint(
+    reasons: readonly string[],
+  ): Promise<{ result: CheckpointSessionResult | undefined; stop: boolean }> {
+    this.publish({ state: "running", startedAt: this.now().toISOString() });
+    try {
+      const result = await this.runner.run(reasons, this.abortController.signal);
+      this.publish(successStatus(result));
+      return { result, stop: false };
+    } catch (error) {
+      if (this.abortController.signal.aborted || this.disposed) {
+        return { result: undefined, stop: true };
+      }
+      for (const reason of reasons) this.dirtyReasons.add(reason);
+      this.publish({ state: "error", error: checkpointError(error, this.now()) });
+      return { result: undefined, stop: true };
+    }
   }
 
   private cancelTimer(): void {
@@ -155,6 +152,25 @@ export class CheckpointCoordinator {
     this.status = status;
     if (this.isCurrent()) this.onStatus?.(structuredClone(status));
   }
+}
+
+function successStatus(result: CheckpointSessionResult | undefined): CheckpointStatus {
+  return result
+    ? {
+        state: "idle",
+        revision: result.record.revision,
+        lastSuccessAt: result.record.capturedAt,
+      }
+    : { state: "idle" };
+}
+
+function checkpointError(error: unknown, occurredAt: Date): CheckpointError {
+  return {
+    code: errorCode(error),
+    message: errorMessage(error),
+    occurredAt: occurredAt.toISOString(),
+    retryable: true,
+  };
 }
 
 function errorCode(error: unknown): string {

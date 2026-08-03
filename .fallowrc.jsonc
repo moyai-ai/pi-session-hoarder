@@ -79,6 +79,12 @@
     "minOccurrences": 2,
     "ignoreImports": true
   },
+  "health": {
+    "coverage": "coverage/coverage-final.json",
+    "maxCyclomatic": 15,
+    "maxCognitive": 12,
+    "maxCrap": 25
+  },
   "rules": {
     "private-type-leaks": "warn",
     "require-suppression-reason": "warn"

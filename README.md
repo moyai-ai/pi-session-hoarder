@@ -139,9 +139,16 @@ The current release is deliberately local-only. It does **not** upload data, rep
 Contributions and issue reports are welcome. To work on the extension locally:
 
 ```bash
-npm install
+npm ci
 pi -e ./src/index.ts
+npm run test:coverage
+npm run analyze
+npm run analyze:audit -- --base origin/main
 npm run check
 ```
+
+`npm run check` typechecks the project, runs the full test suite with Istanbul coverage, enforces coverage thresholds, and runs Fallow's type-aware dead-code, duplication, architecture, and maintainability gates. The current minimum coverage is 85% statements, 75% branches, 90% functions, and 90% lines.
+
+Reusable adapter behavior lives under `test/contracts/`, while deterministic interruption tests use failpoints under `test/support/`. New object-store and Unit of Work adapters should pass the same contracts as the local filesystem implementations.
 
 Runtime code uses TypeScript, Node built-ins, and Pi-provided APIs. Please include tests with behavioral changes and keep dependencies flowing through the existing `domain`, `application`, `adapters`, and `entrypoints` layers. The project is licensed under Apache-2.0.

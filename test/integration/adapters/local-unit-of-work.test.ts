@@ -3,12 +3,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  LocalCheckpointUnitOfWork,
-  LocalSessionArchiveRepository,
-} from "../../../src/adapters/filesystem/local-unit-of-work.js";
+import { LocalCheckpointUnitOfWork } from "../../../src/adapters/filesystem/local-unit-of-work.js";
+import { LocalSessionArchiveRepository } from "../../../src/adapters/filesystem/local-session-archive-repository.js";
 import { LocalFileObjectStore } from "../../../src/adapters/filesystem/local-object-store.js";
 import { SessionArchive, type ObjectReference } from "../../../src/domain/model.js";
+import { checkpointUnitOfWorkContract } from "../../contracts/checkpoint-unit-of-work.contract.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -25,7 +24,7 @@ async function fixture() {
   const source = join(root, "source.jsonl");
   await writeFile(source, "session bytes\n");
   const stored = await objects.putFile(source);
-  return { root, objects, stored };
+  return { root, objects, source, stored };
 }
 
 function archiveFor(object: ObjectReference, revisionSource = { size: 14, mtimeMs: 1 }) {
@@ -39,6 +38,19 @@ function archiveFor(object: ObjectReference, revisionSource = { size: 14, mtimeM
   });
   return archive;
 }
+
+checkpointUnitOfWorkContract("LocalCheckpointUnitOfWork", async () => {
+  const { root, objects, source } = await fixture();
+  return {
+    create: () =>
+      new LocalCheckpointUnitOfWork(new LocalSessionArchiveRepository(root), objects),
+    writeSource: async (contents) => {
+      await writeFile(source, contents);
+      return source;
+    },
+    read: (identity) => new LocalSessionArchiveRepository(root).get(identity),
+  };
+});
 
 describe("LocalCheckpointUnitOfWork", () => {
   it("publishes one aggregate only after explicit commit", async () => {
