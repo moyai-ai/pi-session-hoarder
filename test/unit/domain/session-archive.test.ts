@@ -41,15 +41,15 @@ describe("SessionArchive aggregate", () => {
       source: { size: 10, mtimeMs: 1, sha256: digest },
       sessionObject: object(),
       artifacts: [],
-      capturedAt: "first",
-      lastVerifiedAt: "first",
+      capturedAt: "2026-08-03T00:00:01.000Z",
+      lastVerifiedAt: "2026-08-03T00:00:01.000Z",
     });
     const second = archive.recordCheckpoint({
       source: { size: 11, mtimeMs: 2, sha256: digest },
       sessionObject: object(),
       artifacts: [],
-      capturedAt: "second",
-      lastVerifiedAt: "second",
+      capturedAt: "2026-08-03T00:00:02.000Z",
+      lastVerifiedAt: "2026-08-03T00:00:02.000Z",
     });
 
     expect(first.revision).toBe(1);
@@ -71,8 +71,8 @@ describe("SessionArchive aggregate", () => {
         source: { size: 10, mtimeMs: 1, sha256: "b".repeat(64) },
         sessionObject: object(),
         artifacts: [],
-        capturedAt: "now",
-        lastVerifiedAt: "now",
+        capturedAt: "2026-08-03T00:00:00.000Z",
+        lastVerifiedAt: "2026-08-03T00:00:00.000Z",
       }),
     ).toThrow("must match");
   });
@@ -92,10 +92,41 @@ describe("SessionArchive aggregate", () => {
             state: "captured",
           },
         ],
-        capturedAt: "now",
-        lastVerifiedAt: "now",
+        capturedAt: "2026-08-03T00:00:00.000Z",
+        lastVerifiedAt: "2026-08-03T00:00:00.000Z",
       }),
     ).toThrow("must reference an object");
+  });
+
+  it.each([
+    ["offset timestamps", "2026-08-03T00:00:00.000+00:00"],
+    ["timestamps without milliseconds", "2026-08-03T00:00:00Z"],
+    ["impossible calendar dates", "2026-02-30T00:00:00.000Z"],
+  ])("rejects %s", (_description, capturedAt) => {
+    expect(() => SessionArchive.rehydrate({ ...record(), capturedAt })).toThrow(
+      "capturedAt must be",
+    );
+  });
+
+  it("requires UTC timestamps for verification and persisted errors", () => {
+    expect(() =>
+      SessionArchive.rehydrate({
+        ...record(),
+        lastVerifiedAt: "2026-08-03T00:00:00.000-04:00",
+      }),
+    ).toThrow("lastVerifiedAt must be");
+
+    expect(() =>
+      SessionArchive.rehydrate({
+        ...record(),
+        lastError: {
+          code: "CHECKPOINT_FAILED",
+          message: "failed",
+          occurredAt: "not-a-timestamp",
+          retryable: true,
+        },
+      }),
+    ).toThrow("lastError.occurredAt must be");
   });
 
   it("returns defensive copies instead of exposing aggregate state", () => {

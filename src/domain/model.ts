@@ -1,5 +1,10 @@
 export type RepositoryIdentityKind = "git-remote" | "git-root" | "cwd";
 
+/** Canonical UTC format emitted by Date#toISOString(). */
+export const UTC_TIMESTAMP_PATTERN =
+  "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$";
+const UTC_TIMESTAMP_REGEX = new RegExp(UTC_TIMESTAMP_PATTERN);
+
 export interface RepositoryIdentity {
   kind: RepositoryIdentityKind;
   canonicalValue: string;
@@ -161,6 +166,7 @@ function assertRecordInvariants(record: SessionArchiveRecord): void {
   if (record.source.sha256 !== record.sessionObject.digest) {
     throw new Error("Session source SHA-256 must match the session object digest.");
   }
+  assertRecordTimestamps(record);
   for (const artifact of record.artifacts) {
     if (artifact.state === "captured" && !artifact.object) {
       throw new Error("A captured artifact relation must reference an object.");
@@ -168,5 +174,21 @@ function assertRecordInvariants(record: SessionArchiveRecord): void {
     if (artifact.state !== "captured" && artifact.object) {
       throw new Error("A missing or invalid artifact relation cannot reference an object.");
     }
+  }
+}
+
+function assertRecordTimestamps(record: SessionArchiveRecord): void {
+  assertUtcTimestamp(record.capturedAt, "capturedAt");
+  assertUtcTimestamp(record.lastVerifiedAt, "lastVerifiedAt");
+  if (record.lastError) assertUtcTimestamp(record.lastError.occurredAt, "lastError.occurredAt");
+}
+
+function assertUtcTimestamp(value: string, field: string): void {
+  if (!UTC_TIMESTAMP_REGEX.test(value)) {
+    throw new Error(`${field} must be a canonical UTC ISO 8601 timestamp.`);
+  }
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) {
+    throw new Error(`${field} must be a valid canonical UTC ISO 8601 timestamp.`);
   }
 }
