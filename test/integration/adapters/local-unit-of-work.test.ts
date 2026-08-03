@@ -107,8 +107,8 @@ describe("LocalCheckpointUnitOfWork", () => {
       source: { size: 20, mtimeMs: 2, sha256: stored.object.digest },
       sessionObject: stored.object,
       artifacts: [],
-      capturedAt: "later",
-      lastVerifiedAt: "later",
+      capturedAt: "2026-08-03T00:00:01.000Z",
+      lastVerifiedAt: "2026-08-03T00:00:01.000Z",
     });
     const failingRepository = new LocalSessionArchiveRepository(root, {
       atomicWrite: async () => {
@@ -140,6 +140,21 @@ describe("LocalCheckpointUnitOfWork", () => {
     await expect(repository.get({ repositoryId: "repo-id", sessionId: "session-id" })).rejects.toThrow(
       "contains invalid JSON",
     );
+  });
+
+  it.each([
+    ["2026-08-03T00:00:00.000+00:00", "Invalid session archive record"],
+    ["2026-02-30T00:00:00.000Z", "capturedAt must be a valid"],
+  ])("rejects persisted non-UTC or invalid timestamp %s", async (capturedAt, error) => {
+    const { root, stored } = await fixture();
+    const repository = new LocalSessionArchiveRepository(root);
+    const identity = { repositoryId: "repo-id", sessionId: "session-id" };
+    const path = repository.recordPath(identity);
+    const record = archiveFor(stored.object).record!;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({ ...record, capturedAt }));
+
+    await expect(repository.get(identity)).rejects.toThrow(error);
   });
 
   it("validates persisted aggregate records before rehydrating the domain", async () => {

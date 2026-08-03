@@ -12,6 +12,7 @@ import type {
 } from "../../application/ports.js";
 import {
   SessionArchive,
+  UTC_TIMESTAMP_PATTERN,
   type SessionArchiveRecord,
   type SessionIdentity,
 } from "../../domain/model.js";
@@ -19,6 +20,7 @@ import { atomicWriteFile } from "./atomic-file.js";
 import { LocalFileObjectStore } from "./local-object-store.js";
 
 const Sha256Schema = Type.String({ pattern: "^[a-f0-9]{64}$" });
+const UtcTimestampSchema = Type.String({ pattern: UTC_TIMESTAMP_PATTERN });
 const ObjectReferenceSchema = Type.Object(
   {
     algorithm: Type.Literal("sha256"),
@@ -49,7 +51,7 @@ const CheckpointErrorSchema = Type.Object(
   {
     code: Type.String({ minLength: 1 }),
     message: Type.String({ minLength: 1 }),
-    occurredAt: Type.String({ minLength: 1 }),
+    occurredAt: UtcTimestampSchema,
     retryable: Type.Boolean(),
   },
   { additionalProperties: false },
@@ -70,8 +72,8 @@ const SessionArchiveRecordSchema = Type.Object(
     ),
     sessionObject: ObjectReferenceSchema,
     artifacts: Type.Array(ArtifactRelationSchema),
-    capturedAt: Type.String({ minLength: 1 }),
-    lastVerifiedAt: Type.String({ minLength: 1 }),
+    capturedAt: UtcTimestampSchema,
+    lastVerifiedAt: UtcTimestampSchema,
     lastError: Type.Optional(CheckpointErrorSchema),
   },
   { additionalProperties: false },
