@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/moyai-ai/pi-session-hoarder/main/assets/moyai-logo-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/moyai-ai/pi-session-hoarder/main/assets/moyai-logo.svg">
-    <img src="https://raw.githubusercontent.com/moyai-ai/pi-session-hoarder/main/assets/moyai-logo.svg" alt="Moyai logo" width="360">
+    <img src="https://raw.githubusercontent.com/moyai-ai/pi-session-hoarder/main/assets/moyai-logo.svg" alt="Moyai logo" width="240">
   </picture>
 </p>
 
