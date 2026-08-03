@@ -1,5 +1,5 @@
 {
-  "name": "pi-session-hoarder",
+  "name": "@moyai/pi-session-hoarder",
   "version": "0.1.0",
   "description": "🐿️ A Pi extension that archives sessions into local content-addressed storage.",
   "type": "module",
@@ -7,6 +7,13 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/moyai-ai/pi-session-hoarder.git"
+  },
+  "homepage": "https://github.com/moyai-ai/pi-session-hoarder#readme",
+  "bugs": {
+    "url": "https://github.com/moyai-ai/pi-session-hoarder/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "pi-package"

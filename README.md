@@ -28,10 +28,10 @@ Pi's normal JSONL session remains the active write-ahead journal. Hoarder create
 Install the npm release with Pi:
 
 ```bash
-pi install npm:pi-session-hoarder
+pi install npm:@moyai/pi-session-hoarder
 ```
 
-The first npm release has not been published yet. Until then, install the package directly from GitHub:
+To install the latest source directly from GitHub instead:
 
 ```bash
 pi install https://github.com/moyai-ai/pi-session-hoarder
