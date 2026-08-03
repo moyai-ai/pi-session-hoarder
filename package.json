@@ -19,7 +19,8 @@
     "pi-package"
   ],
   "files": [
-    "src"
+    "src",
+    "assets/moyai-gallery-preview.png"
   ],
   "engines": {
     "node": ">=22.19.0"
@@ -37,7 +38,8 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/moyai-ai/pi-session-hoarder/main/assets/moyai-gallery-preview.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
