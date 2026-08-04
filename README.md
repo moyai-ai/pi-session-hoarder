@@ -37,7 +37,7 @@ To install the latest source directly from GitHub instead:
 pi install https://github.com/moyai-ai/pi-session-hoarder
 ```
 
-Restart Pi after installation. Hoarder begins working automatically when a persisted session starts—there is no required configuration or background service.
+Restart Pi after installation, or run `/reload` in your current Pi session to activate Hoarder immediately. Hoarder begins working automatically when a persisted session starts—there is no required configuration or background service.
 
 > Pi extensions run with your system permissions. Review third-party extension source before installing it.
 
