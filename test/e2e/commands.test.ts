@@ -239,7 +239,7 @@ describe("/hoarder", () => {
     expect(prune).toHaveBeenCalledWith(expect.anything(), "session");
     expect(confirm).toHaveBeenCalledWith(
       "Prune local Session Hoarder cache?",
-      "Eligible objects: 00002\nEligible encoded: 1.5 KiB\nEstimated disk  : 4.0 KiB\nSkipped objects : 00001",
+      "Eligible objects: 00002\nEligible encoded: 1.5 KiB\nEstimated disk  : 4.0 KiB\nSkipped objects : 00001\nAfter prune     : remote-only; no in-product restore command",
     );
     expect(notify).toHaveBeenCalledWith(
       "Removed objects : 00002\nSkipped objects : 00001\nRecovered       : 4.0 KiB\nFailed objects  : 00000\nInvalid receipts: 00000\nInterrupted     : no",

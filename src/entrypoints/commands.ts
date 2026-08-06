@@ -156,6 +156,7 @@ function formatPrunePreview(preview: {
     ["Eligible encoded", formatBytes(preview.eligibleEncodedBytes)],
     ["Estimated disk", formatBytes(preview.eligibleAllocatedBytes)],
     ["Skipped objects", formatRevision(preview.skippedObjects)],
+    ["After prune", "remote-only; no in-product restore command"],
   ]);
 }
 

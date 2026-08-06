@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -13,7 +13,10 @@ import {
 } from "../../src/application/replication-coordinator.js";
 import { SerializedMaintenanceExclusion } from "../../src/application/maintenance-exclusion.js";
 import type { ReplicationApplicationService } from "../../src/application/replication-service.js";
-import { createLocalCheckpointApplication } from "../../src/bootstrap.js";
+import { LocalFileObjectStore } from "../../src/adapters/filesystem/local-object-store.js";
+import { LocalSessionReplicaRepository } from "../../src/adapters/filesystem/local-session-replica-repository.js";
+import { createLocalCheckpointApplication, createPruneApplication } from "../../src/bootstrap.js";
+import { SessionReplica } from "../../src/domain/replica.js";
 import {
   HoarderLifecycle,
   type LifecycleDependencies,
@@ -884,6 +887,59 @@ describe("HoarderLifecycle", () => {
 
     await expect(lifecycle.prune(undefined, "session")).rejects.toThrow("only while S3");
     expect(dependencies.createPruneService).not.toHaveBeenCalled();
+  });
+
+  it("prunes a local object through the installed path after a durable verified S3 receipt", async () => {
+    const { directory, storageRoot, dependencies } = await fixture(true, "s3");
+    dependencies.createPruneService = createPruneApplication;
+    const sourcePath = join(directory, "prune-candidate.txt");
+    await writeFile(sourcePath, "verified remote durability permits pruning");
+    const objects = new LocalFileObjectStore(storageRoot);
+    const stored = await objects.putFile(sourcePath);
+    const replica = SessionReplica.create({
+      targetId: "backup",
+      repositoryId: "repo-id",
+      sessionId: "session",
+    });
+    replica.recordVerifiedRevision({
+      revision: 1,
+      objects: [
+        {
+          object: stored.object,
+          key: `session-hoarder/objects/sha256/${stored.object.digest}.gz`,
+          etag: '"verified"',
+        },
+      ],
+      verifiedAt: "2026-08-06T12:00:00.000Z",
+    });
+    await new LocalSessionReplicaRepository(storageRoot).persist(replica);
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+
+    await expect(lifecycle.prune({ confirm: async () => true }, "session")).resolves.toMatchObject({
+      eligibleObjects: 1,
+      removedObjects: 1,
+      failedObjects: 0,
+    });
+    await expect(objects.has(stored.object.digest)).resolves.toBe(false);
+    await expect(readFile(sessionFile, "utf8")).resolves.toContain('"id":"session"');
+    await expect(
+      new LocalSessionReplicaRepository(storageRoot).get({
+        targetId: "backup",
+        repositoryId: "repo-id",
+        sessionId: "session",
+      }),
+    ).resolves.toMatchObject({
+      record: { objects: [{ object: { digest: stored.object.digest } }] },
+    });
   });
 
   it("runs prune only for the selected S3 target", async () => {

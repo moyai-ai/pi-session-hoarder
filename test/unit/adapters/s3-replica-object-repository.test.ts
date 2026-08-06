@@ -96,6 +96,26 @@ replicaObjectRepositoryContract("S3ReplicaObjectRepository", async () => {
 });
 
 describe("S3ReplicaObjectRepository", () => {
+  it("matches durable receipts only under the configured object-key policy", () => {
+    const fixture = replicaObjectFixture();
+    const expected = new S3ReplicaObjectRepository(config, async () => new StatefulS3Client());
+    const receipt = {
+      object: fixture.object,
+      key: `team/sessions/objects/sha256/${fixture.object.digest}.gz`,
+    };
+
+    expect(expected.matches(fixture.object, receipt)).toBe(true);
+    expect(
+      new S3ReplicaObjectRepository(
+        { ...config, prefix: "different-prefix" },
+        async () => new StatefulS3Client(),
+      ).matches(fixture.object, receipt),
+    ).toBe(false);
+    expect(
+      expected.matches({ ...fixture.object, storedBytes: fixture.object.storedBytes + 1 }, receipt),
+    ).toBe(false);
+  });
+
   it("maps a conditional streaming PutObject request and receipt exactly", async () => {
     const fixture = replicaObjectFixture();
     const putObject = vi.fn(

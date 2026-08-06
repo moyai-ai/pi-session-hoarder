@@ -84,7 +84,7 @@ function createProjectCatalogApplication(
   });
 }
 
-function createPruneApplication(
+export function createPruneApplication(
   storageRoot: string,
   target: S3TargetConfig,
   exclusion: MaintenanceExclusion,

@@ -60,6 +60,18 @@ describe("PruneApplicationService", () => {
     );
   });
 
+  it("rejects receipts that do not match the selected target policy", async () => {
+    const matches = vi.fn(() => false);
+    const { service, cache } = setup({ receiptPolicy: { matches } });
+
+    await expect(service.prune("backup")).resolves.toMatchObject({
+      eligibleObjects: 0,
+      removedObjects: 0,
+    });
+    expect(matches).toHaveBeenCalled();
+    expect(cache.remove).not.toHaveBeenCalled();
+  });
+
   it("leaves cache untouched when confirmation is declined", async () => {
     const { service, cache } = setup();
     await expect(service.prune("backup", { confirm: async () => false })).resolves.toMatchObject({

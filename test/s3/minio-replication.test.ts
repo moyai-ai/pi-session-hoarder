@@ -6,8 +6,6 @@ import { MinioContainer, type StartedMinioContainer } from "@testcontainers/mini
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { LocalCasHydrationStore } from "../../src/adapters/filesystem/local-hydration-store.js";
-import { LocalCasCacheRepository } from "../../src/adapters/filesystem/local-cache-repository.js";
-import { LocalVerifiedReceiptReader } from "../../src/adapters/filesystem/local-verified-receipt-reader.js";
 import { LocalFileObjectStore } from "../../src/adapters/filesystem/local-object-store.js";
 import { LocalReplicationUnitOfWork } from "../../src/adapters/filesystem/local-replication-unit-of-work.js";
 import { LocalSessionReplicaRepository } from "../../src/adapters/filesystem/local-session-replica-repository.js";
@@ -22,8 +20,8 @@ import type {
   ReplicaObjectRepository,
 } from "../../src/application/replication-ports.js";
 import { RetrievalApplicationService } from "../../src/application/retrieval-service.js";
-import { PruneApplicationService } from "../../src/application/prune-service.js";
 import { SerializedMaintenanceExclusion } from "../../src/application/maintenance-exclusion.js";
+import { createPruneApplication } from "../../src/bootstrap.js";
 import type { ObjectReference } from "../../src/domain/model.js";
 import { SessionReplica, type RemoteObjectReceipt } from "../../src/domain/replica.js";
 import { replicaObjectRepositoryContract } from "../contracts/replica-object-repository.contract.js";
@@ -324,12 +322,7 @@ describe("MinIO S3 compatibility", () => {
     });
     await new LocalSessionReplicaRepository(storageRoot).persist(replica);
     const exclusion = new SerializedMaintenanceExclusion();
-    const prune = new PruneApplicationService({
-      cache: new LocalCasCacheRepository(storageRoot),
-      receipts: new LocalVerifiedReceiptReader(storageRoot),
-      receiptPolicy: remote,
-      exclusion,
-    });
+    const prune = createPruneApplication(storageRoot, environment.target(prefix), exclusion);
 
     await expect(prune.prune("minio", { confirm: async () => true })).resolves.toMatchObject({
       eligibleObjects: 1,
