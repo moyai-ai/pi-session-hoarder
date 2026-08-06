@@ -112,20 +112,49 @@ S3-compatible durability is selected with:
 /hoarder storage s3
 ```
 
-The local CAS remains the checkpoint and staging path. Verified gzip objects are replicated to the configured S3 target in the background. Switching back with `/hoarder storage local` synchronously cancels queued or active replication before persisting the local selection. It starts no additional S3 requests, downloads no remote-only history, deletes no remote objects, and does not rewrite committed project catalogs. Selecting S3 again resumes from the newest committed local archive state.
+#### 4.2.1 Replication and target switching
+
+The local CAS remains the checkpoint and staging path. Verified gzip objects are replicated to the configured S3 target in the background.
+
+Switching back with `/hoarder storage local` synchronously cancels queued or active replication before persisting the local selection. It:
+
+- starts no additional S3 requests;
+- downloads no remote-only history;
+- deletes no remote objects; and
+- does not rewrite committed project catalogs.
+
+Selecting S3 again resumes from the newest committed local archive state.
+
+#### 4.2.2 Pruning
 
 `/hoarder prune` is available only while S3 is selected and removes only exact durable verified receipt-backed local CAS objects after confirmation when UI is available. Prune does not perform a restore round trip first; removed objects become remote-only, and there is currently no in-product restore command.
 
-S3 credentials and routing are configured globally. Credentials use the AWS SDK credential chain; project configuration and catalogs never contain credentials and cannot redirect uploads.
+#### 4.2.3 Setup wizard
 
-When no valid target exists, `/hoarder storage s3` opens a short interactive wizard in TUI/RPC modes. The common AWS path asks for the bucket, region, and credential source. Target naming and object-prefix settings are optional advanced fields; custom endpoints and path-style addressing are requested only for S3-compatible services such as MinIO or RustFS. Uploads always use the bucket's encryption settings and never send a per-request encryption override. The wizard then shows a sanitized target and exact current-session upload-size preview and offers either:
+When no valid target exists, `/hoarder storage s3` opens a short interactive wizard in TUI/RPC modes.
+
+The common AWS path asks for the bucket, region, and credential source. Target naming and object-prefix settings are optional advanced fields. Custom endpoints and path-style addressing are requested only for S3-compatible services such as MinIO or RustFS. Uploads always use the bucket's encryption settings and never send a per-request encryption override.
+
+The wizard then shows a sanitized target and exact current-session upload-size preview and offers either:
 
 - upload and verify the current content-addressed session objects before atomically saving/selecting the target; or
 - save/select the target without a test and let normal synchronization perform the first verification.
 
 Draft verification receipts are isolated from the final selected target until the global configuration write succeeds. The first normal synchronization after a successful upload test therefore re-verifies the immutable remote bytes under the selected target identity, but it does not upload them again.
 
-The upload choice explicitly warns that private session and allowlisted Bash sidecar bytes will leave the machine. The wizard never requests access keys, secret keys, session tokens, or web-identity tokens. IAM-user access keys remain supported through the standard AWS credential chain: configure them first with `aws configure --profile session-hoarder` and select that named profile, or expose them through the standard AWS environment variables. For IAM Identity Center, run `aws sso login --profile company-sso` and select `company-sso`. Workload roles and the default AWS profile require no profile entry. In headless print/JSON modes the command performs no prompts and no S3 requests, and instead reports the exact global configuration path.
+#### 4.2.4 Credentials and privacy
+
+S3 credentials and routing are configured globally. Credentials use the AWS SDK credential chain; project configuration and catalogs never contain credentials and cannot redirect uploads.
+
+The upload choice explicitly warns that private session and allowlisted Bash sidecar bytes will leave the machine. The wizard never requests access keys, secret keys, session tokens, or web-identity tokens.
+
+Credential sources work as follows:
+
+- **IAM-user access keys:** They remain supported through the standard AWS credential chain. Configure them first with `aws configure --profile session-hoarder` and select that named profile, or expose them through the standard AWS environment variables.
+- **IAM Identity Center:** Run `aws sso login --profile company-sso` and select `company-sso`.
+- **Workload roles and the default AWS profile:** No profile entry is required.
+
+In headless print/JSON modes, the command performs no prompts and no S3 requests, and instead reports the exact global configuration path.
 
 ### 4.3 Git-tracked project catalogs
 
