@@ -53,16 +53,7 @@ Most of the time, no interaction is necessary. A compact footer indicator shows 
 | `!hoard` | Initialization or the last checkpoint failed |
 | `○hoard off` | Hoarder is disabled or the session is not persisted |
 
-The following commands are available during the R1 rollout:
-
-```text
-/hoarder status
-/hoarder sync
-/hoarder git enable
-/hoarder storage local
-/hoarder storage s3
-/hoarder prune
-```
+The following commands are available:
 
 - `/hoarder status` reports the active session, selected target, catalog revisions, archive sizes, captured artifact count, and last error when applicable.
 - `/hoarder sync` requests an immediate checkpoint instead of waiting for the normal debounce interval.
@@ -111,7 +102,7 @@ You can decode an object with standard gzip tooling:
 gzip -dc ~/.pi/agent/session-hoarder/objects/sha256/<digest>.gz > recovered-session.jsonl
 ```
 
-Catalog schema version 2 stores portable logical object references without machine-specific paths. Existing schema-version-1 catalogs remain readable and are upgraded on the next successful checkpoint commit.
+Archive catalogs store portable logical object references without machine-specific paths. Catalog encoding and accepted schema versions are defined by the current source and validated strictly when read.
 
 ### 4.2 S3 storage
 
@@ -121,9 +112,9 @@ S3-compatible durability is selected with:
 /hoarder storage s3
 ```
 
-The local CAS remains the checkpoint and staging path. Verified gzip objects are replicated to the configured S3 target in the background. Switching back with `/hoarder storage local` synchronously cancels queued or active replication before persisting the local selection. It starts no additional S3 requests, downloads no remote-only history, deletes no remote objects, and does not rewrite committed project catalogs. Existing verified S3 receipts remain available for later explicit retrieval, and selecting S3 again resumes from the newest committed local archive state.
+The local CAS remains the checkpoint and staging path. Verified gzip objects are replicated to the configured S3 target in the background. Switching back with `/hoarder storage local` synchronously cancels queued or active replication before persisting the local selection. It starts no additional S3 requests, downloads no remote-only history, deletes no remote objects, and does not rewrite committed project catalogs. Selecting S3 again resumes from the newest committed local archive state.
 
-Lazy retrieval verifies encoded transport bytes and the uncompressed logical SHA-256 before atomically reinstalling an object into local CAS. `/hoarder prune` is available only while S3 is selected and removes only exact durable verified receipt-backed local CAS objects after confirmation when UI is available. Prune does not perform a restore round trip first; removed objects become remote-only, and R1 currently has no in-product restore command.
+`/hoarder prune` is available only while S3 is selected and removes only exact durable verified receipt-backed local CAS objects after confirmation when UI is available. Prune does not perform a restore round trip first; removed objects become remote-only, and there is currently no in-product restore command.
 
 S3 credentials and routing are configured globally. Credentials use the AWS SDK credential chain; project configuration and catalogs never contain credentials and cannot redirect uploads.
 
@@ -152,7 +143,7 @@ After a verified local checkpoint—or after matching S3 publication when S3 is 
 
 The projection contains logical object identities, sizes, allowlisted artifact relations, structural Git context, and verified local/S3 location descriptors. It excludes session content, prompts, absolute paths, credentials, configured endpoints, credential profiles, and private operational errors.
 
-The file appears as an ordinary worktree change. Hoarder never stages, commits, amends, installs hooks, or changes the Git index. Commit the projection with the related source changes when you want the source commit or pull request to retain direct provenance to that session revision. Catalog files received from another branch or pull request are untrusted; remote retrieval is allowed only through a matching globally configured target.
+The file appears as an ordinary worktree change. Hoarder never stages, commits, amends, installs hooks, or changes the Git index. Commit the projection with the related source changes when you want the source commit or pull request to retain direct provenance to that session revision.
 
 ## 5. Configuration
 
@@ -180,7 +171,7 @@ If `PI_CODING_AGENT_DIR` is set, the global configuration file is read from that
 | `enabled` | Enables or disables collection |
 | `debounceMs` | Delay used to coalesce normal session updates |
 | `shutdownTimeoutMs` | Maximum time allowed for the final shutdown checkpoint |
-| `retrievalConfirmationBytes` | Encoded-byte threshold above which explicit lazy retrieval requires confirmation |
+| `retrievalConfirmationBytes` | Reserved confirmation threshold for the implemented retrieval service; no user command currently invokes retrieval |
 | `storageRoot` | Location of the local content-addressed archive |
 | `storageTarget` | Selected durability target: `local` or `s3` |
 | `s3` | Global-only named S3 target settings used when `storageTarget` is `s3` |
