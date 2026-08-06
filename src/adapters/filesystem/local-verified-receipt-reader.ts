@@ -15,7 +15,7 @@ interface ReceiptScan {
   invalidRecords: number;
 }
 
-/** Reads only private, durably committed replica records for one configured target. */
+/** Reads all private, durably committed replica revision records for one configured target. */
 export class LocalVerifiedReceiptReader implements VerifiedReceiptReader {
   private readonly replicasRoot: string;
 
@@ -46,16 +46,30 @@ async function scanRepository(
   signal?: AbortSignal,
 ): Promise<ReceiptScan> {
   signal?.throwIfAborted();
-  const records = await readdir(repositoryRoot, { withFileTypes: true });
-  const scans = await Promise.all(
-    records
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-      .map((entry) => readReceiptRecord(join(repositoryRoot, entry.name), targetId, signal)),
+  const entries = await readdir(repositoryRoot, { withFileTypes: true });
+  const legacyRecords = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => readReceiptRecord(join(repositoryRoot, entry.name), targetId, signal));
+  const revisionHistories = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => scanRevisionHistory(join(repositoryRoot, entry.name), targetId, signal));
+  return combineScans(await Promise.all([...legacyRecords, ...revisionHistories]));
+}
+
+async function scanRevisionHistory(
+  historyRoot: string,
+  targetId: string,
+  signal?: AbortSignal,
+): Promise<ReceiptScan> {
+  signal?.throwIfAborted();
+  const records = await readdir(historyRoot, { withFileTypes: true });
+  return combineScans(
+    await Promise.all(
+      records
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+        .map((entry) => readReceiptRecord(join(historyRoot, entry.name), targetId, signal)),
+    ),
   );
-  return {
-    receipts: scans.flatMap((scan) => scan.receipts),
-    invalidRecords: scans.reduce((sum, scan) => sum + scan.invalidRecords, 0),
-  };
 }
 
 async function readReceiptRecord(
@@ -82,6 +96,13 @@ async function readOptionalDirectory(path: string): Promise<Dirent[]> {
     if (hasErrorCode(error, "ENOENT")) return [];
     throw error;
   }
+}
+
+function combineScans(scans: readonly ReceiptScan[]): ReceiptScan {
+  return {
+    receipts: scans.flatMap((scan) => scan.receipts),
+    invalidRecords: scans.reduce((sum, scan) => sum + scan.invalidRecords, 0),
+  };
 }
 
 function deduplicate(receipts: readonly RemoteObjectReceipt[]): RemoteObjectReceipt[] {

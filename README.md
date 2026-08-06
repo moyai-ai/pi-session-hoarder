@@ -72,6 +72,7 @@ Local storage is the zero-configuration default, and it remains the first write 
 ~/.pi/agent/session-hoarder/
   objects/sha256/<hash>.gz
   catalog/<repo-id>/<session-id>.json
+  replicas/<target-id>/<repo-id>/<session-id>/<revision>.json
   tmp/
 ```
 
@@ -131,6 +132,8 @@ Selecting S3 again resumes from the newest committed local state.
 #### 4.2.4 Pruning
 
 `/hoarder prune` frees local disk space once S3 holds the data. It is available only while S3 is selected. After a preview and, when UI is available, your confirmation, it deletes exactly those local objects whose upload carries a durable, verified receipt—never source sessions, catalogs, receipts, configuration, or remote objects.
+
+Each successfully published replica revision is retained as an immutable local receipt record. Historical objects therefore remain prune-eligible after newer session revisions are published; Hoarder does not need to list or download S3 objects again to re-establish trust. Existing latest-only receipt files from earlier releases remain readable, and future publications begin an immutable revision history alongside them.
 
 Prune trusts those exact receipts rather than re-downloading objects to check them. Pruned objects therefore become remote-only; with no in-product restore command yet, you must fetch and decompress them yourself if you need them back.
 

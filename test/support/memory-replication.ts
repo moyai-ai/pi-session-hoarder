@@ -101,8 +101,8 @@ export class MemoryRemoteObjects implements ReplicaObjectRepository {
   }
 }
 
-export function replicaObjectFixture() {
-  const logical = Buffer.from("logical replica object");
+export function replicaObjectFixture(content = "logical replica object") {
+  const logical = Buffer.from(content);
   const encoded = gzipSync(logical);
   const object: ObjectReference = {
     algorithm: "sha256",

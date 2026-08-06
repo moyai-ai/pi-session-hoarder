@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import {
   LocalReplicationUnitOfWorkFactory,
 } from "../../../src/adapters/filesystem/local-replication-unit-of-work.js";
 import { LocalSessionReplicaRepository } from "../../../src/adapters/filesystem/local-session-replica-repository.js";
+import { LocalVerifiedReceiptReader } from "../../../src/adapters/filesystem/local-verified-receipt-reader.js";
 import type { ReplicaObjectRepository } from "../../../src/application/replication-ports.js";
 import {
   SessionReplica,
@@ -86,6 +87,77 @@ describe("LocalReplicationUnitOfWork", () => {
     });
   });
 
+  it("preserves an immutable record and receipt inventory for every committed revision", async () => {
+    const root = await storageRoot();
+    const first = replicaObjectFixture("first published object");
+    const second = replicaObjectFixture("second published object");
+    const objects = new MemoryRemoteObjects();
+    const firstReceipt = await putReceipt(objects, first.object, first.payload());
+    const secondReceipt = await putReceipt(objects, second.object, second.payload());
+    const repository = new LocalSessionReplicaRepository(root);
+    const initial = new LocalReplicationUnitOfWork(repository, objects);
+    initial.replicas.add(replicaAt(identity, 1, firstReceipt));
+    await initial.commit();
+
+    const loaded = await new LocalSessionReplicaRepository(root).get(identity);
+    if (!loaded) throw new Error("expected persisted replica");
+    loaded.recordVerifiedRevision({
+      revision: 3,
+      objects: [secondReceipt],
+      verifiedAt: "2026-08-05T12:03:00.000Z",
+    });
+    const advanced = new LocalReplicationUnitOfWork(
+      new LocalSessionReplicaRepository(root),
+      objects,
+    );
+    advanced.replicas.add(loaded);
+    await advanced.commit();
+
+    await expect(readFile(repository.revisionRecordPath(identity, 1), "utf8")).resolves.toContain(
+      '"revision": 1',
+    );
+    await expect(readFile(repository.revisionRecordPath(identity, 3), "utf8")).resolves.toContain(
+      '"revision": 3',
+    );
+    await expect(new LocalSessionReplicaRepository(root).get(identity)).resolves.toMatchObject({
+      record: { revision: 3, objects: [secondReceipt] },
+    });
+    await expect(new LocalVerifiedReceiptReader(root).list("backup")).resolves.toMatchObject({
+      receipts: expect.arrayContaining([firstReceipt, secondReceipt]),
+      invalidRecords: 0,
+    });
+  });
+
+  it("loads a legacy latest-only record and appends future revision history", async () => {
+    const root = await storageRoot();
+    const fixture = replicaObjectFixture();
+    const objects = new MemoryRemoteObjects();
+    const receipt = await putReceipt(objects, fixture.object, fixture.payload());
+    const repository = new LocalSessionReplicaRepository(root);
+    const legacy = replicaAt(identity, 1, receipt);
+    await mkdir(dirname(repository.recordPath(identity)), { recursive: true });
+    await writeFile(repository.recordPath(identity), `${JSON.stringify(legacy.record, null, 2)}\n`);
+
+    const loaded = await repository.get(identity);
+    if (!loaded) throw new Error("expected legacy replica");
+    loaded.recordVerifiedRevision({
+      revision: 2,
+      objects: [receipt],
+      verifiedAt: "2026-08-05T12:02:00.000Z",
+    });
+    await repository.persist(loaded);
+
+    await expect(readFile(repository.recordPath(identity), "utf8")).resolves.toContain(
+      '"revision": 1',
+    );
+    await expect(readFile(repository.revisionRecordPath(identity, 2), "utf8")).resolves.toContain(
+      '"revision": 2',
+    );
+    await expect(new LocalSessionReplicaRepository(root).get(identity)).resolves.toMatchObject({
+      record: { revision: 2 },
+    });
+  });
+
   it("rejects stale concurrent replica publication", async () => {
     const root = await storageRoot();
     const fixture = replicaObjectFixture();
@@ -119,6 +191,9 @@ describe("LocalReplicationUnitOfWork", () => {
     );
     expect(repository.recordPath(identity)).toBe(
       join(root, "replicas", "backup", "repo", "session.json"),
+    );
+    expect(repository.revisionRecordPath(identity, 123_456)).toBe(
+      join(root, "replicas", "backup", "repo", "session", "123456.json"),
     );
   });
 

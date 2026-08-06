@@ -455,7 +455,8 @@ describe("MinIO S3 compatibility", () => {
     );
     const first = await checkpoint.checkpoint({ ...identity, sessionFile });
     const artifact = first?.record.artifacts[0]?.object;
-    if (!artifact) throw new Error("expected captured artifact");
+    const firstSessionObject = first?.record.sessionObject;
+    if (!artifact || !firstSessionObject) throw new Error("expected captured checkpoint objects");
     await replication.sync({ targetId: "minio", ...identity });
     await rm(sidecar);
     await writeFile(
@@ -480,10 +481,11 @@ describe("MinIO S3 compatibility", () => {
     const exclusion = new SerializedMaintenanceExclusion();
     const prune = createPruneApplication(storageRoot, target, exclusion);
     await expect(prune.prune("minio", { confirm: async () => true })).resolves.toMatchObject({
-      removedObjects: 2,
+      removedObjects: 3,
       failedObjects: 0,
     });
     const localObjects = new LocalFileObjectStore(storageRoot);
+    await expect(localObjects.has(firstSessionObject.digest)).resolves.toBe(false);
     await expect(localObjects.has(artifact.digest)).resolves.toBe(false);
 
     const retrieval = new RetrievalApplicationService({
