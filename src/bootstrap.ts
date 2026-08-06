@@ -35,7 +35,7 @@ import type { MaintenanceExclusion } from "./application/maintenance-exclusion.j
 import { PruneApplicationService } from "./application/prune-service.js";
 import { ProjectCatalogApplicationService } from "./application/project-catalog.js";
 import { registerHoarderCommands } from "./entrypoints/commands.js";
-import { HoarderLifecycle } from "./entrypoints/lifecycle.js";
+import { HoarderLifecycle, type LifecycleDependencies } from "./entrypoints/lifecycle.js";
 
 export interface LocalCheckpointApplication {
   service: CheckpointApplicationService;
@@ -125,10 +125,9 @@ export function fingerprintDraftTarget(target: S3TargetConfig): string {
   return `setup-${createHash("sha256").update(identity).digest("hex").slice(0, 32)}`;
 }
 
-/** Composition root: the only place concrete adapters are wired to Pi entrypoints. */
-export function bootstrapSessionHoarder(pi: ExtensionAPI): void {
+function createLifecycleDependencies(): LifecycleDependencies {
   const maintenanceByRoot = new Map<string, SerializedMaintenanceExclusion>();
-  const lifecycle = new HoarderLifecycle({
+  return {
     loadConfiguration: loadConfig,
     resolveRepository: resolveRepositoryIdentity,
     createCheckpointService: (storageRoot) => createLocalCheckpointApplication(storageRoot).service,
@@ -138,13 +137,8 @@ export function bootstrapSessionHoarder(pi: ExtensionAPI): void {
     createReplicationCoordinator: (options) => new ReplicationCoordinator(options),
     createProjectCatalogService: createProjectCatalogApplication,
     gitWorktree: new LocalGitWorktreeInspector(),
-    createMaintenanceExclusion: (storageRoot) => {
-      const existing = maintenanceByRoot.get(storageRoot);
-      if (existing) return existing;
-      const created = new SerializedMaintenanceExclusion();
-      maintenanceByRoot.set(storageRoot, created);
-      return created;
-    },
+    createMaintenanceExclusion: (storageRoot) =>
+      maintenanceExclusion(maintenanceByRoot, storageRoot),
     createPruneService: createPruneApplication,
     configurationWriter: createConfigurationWriter(),
     s3TargetDraftValidator: createS3TargetDraftValidator(),
@@ -154,7 +148,23 @@ export function bootstrapSessionHoarder(pi: ExtensionAPI): void {
       setInterval: (callback, intervalMs) => setInterval(callback, intervalMs),
       clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
     },
-  });
+  };
+}
+
+function maintenanceExclusion(
+  exclusions: Map<string, SerializedMaintenanceExclusion>,
+  storageRoot: string,
+): SerializedMaintenanceExclusion {
+  const existing = exclusions.get(storageRoot);
+  if (existing) return existing;
+  const created = new SerializedMaintenanceExclusion();
+  exclusions.set(storageRoot, created);
+  return created;
+}
+
+/** Composition root: the only place concrete adapters are wired to Pi entrypoints. */
+export function bootstrapSessionHoarder(pi: ExtensionAPI): void {
+  const lifecycle = new HoarderLifecycle(createLifecycleDependencies());
   lifecycle.register(pi);
   registerHoarderCommands(pi, lifecycle);
 }
