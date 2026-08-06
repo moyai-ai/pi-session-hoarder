@@ -4,6 +4,7 @@ import {
   DEFAULT_CONFIG,
   createConfigurationWriter,
   loadConfig,
+  validateS3SetupDraft,
   type ConfigDependencies,
   type ConfigWriterDependencies,
 } from "../../../src/adapters/config.js";
@@ -96,7 +97,6 @@ describe("loadConfig", () => {
             prefix: "/archives/pi/",
             endpoint: "http://localhost:9000/",
             forcePathStyle: true,
-            serverSideEncryption: "AES256",
           },
         }),
         [projectPath]: JSON.stringify({ gitCatalogEnabled: true }),
@@ -114,10 +114,81 @@ describe("loadConfig", () => {
         prefix: "archives/pi",
         endpoint: "http://localhost:9000",
         forcePathStyle: true,
-        serverSideEncryption: "AES256",
       },
     });
   });
+
+  it("uses the same normalized S3 validation for startup and wizard drafts", async () => {
+    const target = validateS3SetupDraft({
+      targetId: "backup",
+      bucket: "private-bucket",
+      region: "us-east-1",
+      prefix: " /team//sessions/ ",
+      endpoint: "https://objects.example.test/",
+      profile: "archive_profile",
+      forcePathStyle: true,
+    });
+
+    expect(target).toEqual({
+      targetId: "backup",
+      bucket: "private-bucket",
+      region: "us-east-1",
+      prefix: "team/sessions",
+      endpoint: "https://objects.example.test",
+      profile: "archive_profile",
+      forcePathStyle: true,
+    });
+  });
+
+  it.each([
+    ["unsafe prefix", { prefix: "team/../private" }, "path segments"],
+    [
+      "credential-bearing endpoint",
+      { endpoint: "https://user:secret@objects.example.test/?token=secret" },
+      "must not contain userinfo",
+    ],
+    ["malformed profile", { profile: "profile with spaces" }, "safe AWS profile name"],
+  ])("rejects %s identically for setup drafts", (_name, patch, message) => {
+    expect(() =>
+      validateS3SetupDraft({
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: "session-hoarder",
+        endpoint: "",
+        profile: "",
+        forcePathStyle: false,
+        ...patch,
+      }),
+    ).toThrow(message);
+  });
+
+  it.each(["serverSideEncryption", "kmsKeyId"])(
+    "rejects removed S3 encryption override field %s",
+    async (field) => {
+      const result = await loadConfig(
+        { cwd, isProjectTrusted: false },
+        dependencies({
+          [globalPath]: JSON.stringify({
+            storageTarget: "s3",
+            s3: {
+              targetId: "backup",
+              bucket: "bucket",
+              region: "us-east-1",
+              prefix: "session-hoarder",
+              forcePathStyle: false,
+              [field]: field === "serverSideEncryption" ? "AES256" : "alias/key",
+            },
+          }),
+        }),
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.config.storageTarget).toBe("local");
+      if (!result.ok) return;
+      expect(result.warning?.message).toContain(`unknown key "s3.${field}"`);
+    },
+  );
 
   it("degrades invalid remote configuration to local without disabling collection", async () => {
     const result = await loadConfig(
@@ -246,6 +317,55 @@ describe("loadConfig", () => {
 });
 
 describe("configuration writer", () => {
+  it("atomically configures and selects a complete validated S3 target", async () => {
+    const files = new Map<string, string>([
+      [globalPath, `${JSON.stringify({ enabled: false, debounceMs: 100 })}\n`],
+    ]);
+    const writer = createConfigurationWriter(writerDependencies(files));
+
+    await writer.configureAndSelectS3({
+      targetId: "backup",
+      bucket: "private-bucket",
+      region: "us-east-1",
+      prefix: "session-hoarder",
+      forcePathStyle: false,
+    });
+
+    expect(JSON.parse(files.get(globalPath)!)).toEqual({
+      enabled: false,
+      debounceMs: 100,
+      storageTarget: "s3",
+      s3: {
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: "session-hoarder",
+        forcePathStyle: false,
+      },
+    });
+  });
+
+  it("leaves configuration unchanged when the atomic S3 write fails", async () => {
+    const original = `${JSON.stringify({ enabled: false })}\n`;
+    const files = new Map<string, string>([[globalPath, original]]);
+    const deps = writerDependencies(files);
+    deps.atomicWrite = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const writer = createConfigurationWriter(deps);
+
+    await expect(
+      writer.configureAndSelectS3({
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: "session-hoarder",
+        forcePathStyle: false,
+      }),
+    ).rejects.toThrow("disk full");
+    expect(files.get(globalPath)).toBe(original);
+  });
+
   it("selects the global target without discarding existing settings", async () => {
     const files = new Map<string, string>([
       [globalPath, `${JSON.stringify({ enabled: false, s3: { targetId: "backup" } })}\n`],

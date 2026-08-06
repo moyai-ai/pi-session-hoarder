@@ -2,12 +2,20 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MinioContainer, type StartedMinioContainer } from "@testcontainers/minio";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { createS3TargetDraftValidator } from "../../src/adapters/config.js";
+
+import { LocalEncodedObjectSource } from "../../src/adapters/filesystem/local-encoded-object-source.js";
 import { LocalCasHydrationStore } from "../../src/adapters/filesystem/local-hydration-store.js";
 import { LocalFileObjectStore } from "../../src/adapters/filesystem/local-object-store.js";
-import { LocalReplicationUnitOfWork } from "../../src/adapters/filesystem/local-replication-unit-of-work.js";
+import {
+  LocalReplicationUnitOfWork,
+  LocalReplicationUnitOfWorkFactory,
+} from "../../src/adapters/filesystem/local-replication-unit-of-work.js";
+import { LocalSessionArchiveRepository } from "../../src/adapters/filesystem/local-session-archive-repository.js";
 import { LocalSessionReplicaRepository } from "../../src/adapters/filesystem/local-session-replica-repository.js";
 import { StreamingEncodedObjectVerifier } from "../../src/adapters/filesystem/streaming-encoded-object-verifier.js";
 import {
@@ -15,13 +23,22 @@ import {
   type S3ClientBoundaryFactory,
 } from "../../src/adapters/s3/s3-client.js";
 import { S3ReplicaObjectRepository } from "../../src/adapters/s3/s3-replica-object-repository.js";
+import type { S3TargetConfig } from "../../src/application/configuration.js";
 import type {
   EncodedObjectPayload,
   ReplicaObjectRepository,
 } from "../../src/application/replication-ports.js";
+import { ReplicationApplicationService } from "../../src/application/replication-service.js";
+import { CheckpointCoordinator } from "../../src/application/checkpoint-coordinator.js";
 import { RetrievalApplicationService } from "../../src/application/retrieval-service.js";
 import { SerializedMaintenanceExclusion } from "../../src/application/maintenance-exclusion.js";
-import { createPruneApplication } from "../../src/bootstrap.js";
+import { ReplicationCoordinator } from "../../src/application/replication-coordinator.js";
+import {
+  createLocalCheckpointApplication,
+  createPruneApplication,
+  fingerprintDraftTarget,
+} from "../../src/bootstrap.js";
+import { HoarderLifecycle } from "../../src/entrypoints/lifecycle.js";
 import type { ObjectReference } from "../../src/domain/model.js";
 import { SessionReplica, type RemoteObjectReceipt } from "../../src/domain/replica.js";
 import { replicaObjectRepositoryContract } from "../contracts/replica-object-repository.contract.js";
@@ -106,6 +123,119 @@ replicationUnitOfWorkContract("MinIO LocalReplicationUnitOfWork", async () => {
 });
 
 describe("MinIO S3 compatibility", () => {
+  it("runs interactive draft verification, persists selection, then syncs and retrieves", async () => {
+    const prefix = nextPrefix("interactive-setup");
+    const storageRoot = join(temporaryRoot, prefix);
+    const sessionFile = join(temporaryRoot, `${prefix}.jsonl`);
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "setup-session" })}\n`,
+    );
+    const configured = vi.fn(async () => undefined);
+    let putObjectCalls = 0;
+    const handlers = new Map<string, (...args: never[]) => unknown>();
+    const lifecycle = new HoarderLifecycle({
+      loadConfiguration: async () => ({
+        ok: true,
+        config: {
+          enabled: true,
+          debounceMs: 0,
+          shutdownTimeoutMs: 1000,
+          storageRoot,
+          storageTarget: "local",
+          gitCatalogEnabled: false,
+        },
+        paths: { global: join(temporaryRoot, "global.json"), project: "project.json" },
+        loadedFrom: [],
+      }),
+      resolveRepository: async () => ({
+        kind: "cwd",
+        canonicalValue: temporaryRoot,
+        repositoryId: "setup-repository",
+      }),
+      createCheckpointService: (root) => createLocalCheckpointApplication(root).service,
+      createCoordinator: (options) => new CheckpointCoordinator(options),
+      createReplicationService: (root, target) =>
+        createObservedReplicationApplication(root, target, () => {
+          putObjectCalls += 1;
+        }),
+      createReplicationCoordinator: (options) => new ReplicationCoordinator(options),
+      createMaintenanceExclusion: () => new SerializedMaintenanceExclusion(),
+      createProjectCatalogService: vi.fn(() => ({ publish: vi.fn() }) as never),
+      gitWorktree: { inspect: vi.fn(async () => undefined) },
+      createPruneService: vi.fn(() => ({ prune: vi.fn() }) as never),
+      configurationWriter: {
+        configureAndSelectS3: configured,
+        selectStorageTarget: vi.fn(async () => undefined),
+        enableGitCatalog: vi.fn(async () => undefined),
+      },
+      s3TargetDraftValidator: createS3TargetDraftValidator(),
+      draftReplicationTargetId: fingerprintDraftTarget,
+      defaultS3Region: () => "us-east-1",
+      uiScheduler: {
+        setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
+        clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+      },
+    });
+    lifecycle.register({
+      on: vi.fn((event: string, handler: (...args: never[]) => unknown) =>
+        handlers.set(event, handler),
+      ),
+    } as unknown as ExtensionAPI);
+    const context = {
+      cwd: temporaryRoot,
+      hasUI: true,
+      isProjectTrusted: () => true,
+      ui: {
+        setStatus: vi.fn(),
+        theme: { fg: (_color: string, text: string) => text },
+      },
+      sessionManager: {
+        getSessionId: () => "setup-session",
+        getSessionFile: () => sessionFile,
+      },
+    } as unknown as ExtensionContext;
+    await handlers.get("session_start")!({ reason: "startup" } as never, context as never);
+    const preview = await lifecycle.prepareS3Setup(
+      {
+        targetId: "minio-setup",
+        bucket: environment.bucket,
+        region: "us-east-1",
+        prefix,
+        endpoint: environment.endpoint,
+        profile: "",
+        forcePathStyle: true,
+      },
+      "setup-session",
+    );
+
+    await expect(
+      lifecycle.completeS3Setup(preview, "upload-and-save", "setup-session"),
+    ).resolves.toEqual({ target: "s3:minio-setup", verified: true });
+    expect(configured).toHaveBeenCalledWith(preview.target);
+    expect(putObjectCalls).toBe(1);
+    const sync = await lifecycle.sync("setup-session");
+    expect(putObjectCalls).toBe(1);
+    expect(sync.replication?.record).toMatchObject({
+      targetId: "minio-setup",
+      revision: 1,
+    });
+    const receipt = sync.replication!.record.objects[0]!;
+    const objectPath = join(storageRoot, "objects", "sha256", `${receipt.object.digest}.gz`);
+    await rm(objectPath);
+    const retrieval = new RetrievalApplicationService({
+      remote: repository(prefix) as S3ReplicaObjectRepository,
+      local: new LocalCasHydrationStore(new LocalFileObjectStore(storageRoot)),
+      confirmation: { confirm: async () => true },
+      confirmationThresholdBytes: Number.MAX_SAFE_INTEGER,
+      exclusion: new SerializedMaintenanceExclusion(),
+    });
+    await expect(retrieval.hydrate({ object: receipt.object, receipt })).resolves.toMatchObject({
+      hydrated: true,
+    });
+    await handlers.get("session_shutdown")!({ reason: "quit" } as never, context as never);
+  });
+
   it.each([
     ["empty", Buffer.alloc(0)],
     ["text", Buffer.from("Pi Session Hoarder remote durability")],
@@ -443,6 +573,34 @@ function isConditionalConflict(error: unknown): boolean {
     value.name === "ConditionalRequestConflict" ||
     value.name === "PreconditionFailed"
   );
+}
+
+function createObservedReplicationApplication(
+  storageRoot: string,
+  target: S3TargetConfig,
+  onPut: () => void,
+): ReplicationApplicationService {
+  const localObjects = new LocalFileObjectStore(storageRoot);
+  const baseFactory = createLazyAwsS3ClientFactory(target);
+  const observedFactory: S3ClientBoundaryFactory = async () => {
+    const client = await baseFactory();
+    return {
+      headObject: (input, signal) => client.headObject(input, signal),
+      getObject: (input, signal) => client.getObject!(input, signal),
+      putObject: (input, signal) => {
+        onPut();
+        return client.putObject(input, signal);
+      },
+    };
+  };
+  const remote = new S3ReplicaObjectRepository(target, observedFactory);
+  return new ReplicationApplicationService({
+    archives: new LocalSessionArchiveRepository(storageRoot),
+    source: new LocalEncodedObjectSource(localObjects),
+    verifier: new StreamingEncodedObjectVerifier(),
+    unitOfWorkFactory: new LocalReplicationUnitOfWorkFactory(storageRoot, () => remote),
+    clock: { now: () => new Date() },
+  });
 }
 
 function restoreEnvironment(key: string, value: string | undefined): void {

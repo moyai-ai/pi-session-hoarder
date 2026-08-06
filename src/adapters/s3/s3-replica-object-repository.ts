@@ -14,6 +14,7 @@ import type {
   RemoteObjectRetriever,
 } from "../../application/retrieval-ports.js";
 import type { RemoteReceiptPolicy } from "../../application/prune-ports.js";
+import { normalizeS3Prefix } from "../../application/s3-target.js";
 import type {
   S3ClientBoundaryFactory,
   S3GetObjectOutput,
@@ -66,17 +67,12 @@ export class S3ReplicaObjectRepository
   private readonly bucket: string;
   private readonly targetId: string;
   private readonly prefix: string;
-  private readonly encryption: Pick<S3TargetConfig, "serverSideEncryption" | "kmsKeyId">;
   private readonly clientFactory: S3ClientBoundaryFactory;
 
   constructor(config: S3TargetConfig, clientFactory: S3ClientBoundaryFactory) {
     this.bucket = config.bucket;
     this.targetId = config.targetId;
     this.prefix = normalizeS3Prefix(config.prefix);
-    this.encryption = {
-      ...(config.serverSideEncryption ? { serverSideEncryption: config.serverSideEncryption } : {}),
-      ...(config.kmsKeyId ? { kmsKeyId: config.kmsKeyId } : {}),
-    };
     this.clientFactory = clientFactory;
   }
 
@@ -135,10 +131,6 @@ export class S3ReplicaObjectRepository
           IfNoneMatch: "*",
           ChecksumSHA256: input.checksumSha256,
           Metadata: objectMetadata(input.object),
-          ...(this.encryption.serverSideEncryption
-            ? { ServerSideEncryption: this.encryption.serverSideEncryption }
-            : {}),
-          ...(this.encryption.kmsKeyId ? { SSEKMSKeyId: this.encryption.kmsKeyId } : {}),
         },
         signal,
       );
@@ -297,19 +289,7 @@ function retrievalPayload(
   };
 }
 
-export function normalizeS3Prefix(prefix: string): string {
-  if (/\p{Cc}/u.test(prefix) || prefix.includes("\\")) {
-    throw new Error("S3 object prefix must not contain control characters or backslashes.");
-  }
-  const segments = prefix
-    .split("/")
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
-  if (segments.some((segment) => segment === "." || segment === "..")) {
-    throw new Error('S3 object prefix must not contain "." or ".." path segments.');
-  }
-  return segments.join("/");
-}
+export { normalizeS3Prefix } from "../../application/s3-target.js";
 
 function validatePutInput(input: RemoteObjectPutInput): void {
   if (!Number.isSafeInteger(input.contentLength) || input.contentLength < 0) {

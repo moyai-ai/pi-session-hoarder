@@ -28,8 +28,6 @@ const config: S3TargetConfig = {
   region: "us-east-1",
   prefix: "//team//sessions//",
   forcePathStyle: false,
-  serverSideEncryption: "aws:kms",
-  kmsKeyId: "alias/session-hoarder",
 };
 
 class StatefulS3Client implements S3ClientBoundary {
@@ -151,8 +149,6 @@ describe("S3ReplicaObjectRepository", () => {
         "hoarder-logical-bytes": String(fixture.object.logicalBytes),
         "hoarder-stored-bytes": String(fixture.object.storedBytes),
       },
-      ServerSideEncryption: "aws:kms",
-      SSEKMSKeyId: "alias/session-hoarder",
     });
     expect(receivedSignal).toBe(signal);
     expect(result).toEqual({

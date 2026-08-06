@@ -33,8 +33,6 @@ export interface S3PutObjectInput {
   IfNoneMatch: "*";
   ChecksumSHA256: string;
   Metadata: Record<string, string>;
-  ServerSideEncryption?: "AES256" | "aws:kms";
-  SSEKMSKeyId?: string;
 }
 
 export interface S3GetObjectInput {

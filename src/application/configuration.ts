@@ -1,7 +1,5 @@
 export type StorageTarget = "local" | "s3";
 
-export type ServerSideEncryption = "AES256" | "aws:kms";
-
 export interface S3TargetConfig {
   targetId: string;
   bucket: string;
@@ -10,8 +8,6 @@ export interface S3TargetConfig {
   endpoint?: string;
   profile?: string;
   forcePathStyle: boolean;
-  serverSideEncryption?: ServerSideEncryption;
-  kmsKeyId?: string;
 }
 
 export interface HoarderConfig {
@@ -64,6 +60,7 @@ export type ConfigLoadResult =
     };
 
 export interface ConfigurationWriter {
+  configureAndSelectS3(target: S3TargetConfig): Promise<void>;
   selectStorageTarget(target: StorageTarget): Promise<void>;
   enableGitCatalog(cwd: string): Promise<void>;
 }

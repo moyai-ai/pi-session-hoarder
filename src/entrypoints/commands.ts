@@ -1,8 +1,10 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import type { StorageTarget } from "../application/configuration.js";
 import { formatDetailedStatus } from "../application/status.js";
+import { alignRows, formatBytes } from "./formatting.js";
 import type { HoarderController } from "./lifecycle.js";
+import { PiS3SetupPrompter } from "./s3-setup-prompter.js";
 
 const USAGE =
   "Usage: /hoarder status | /hoarder sync | /hoarder git enable | /hoarder storage local | /hoarder storage s3 | /hoarder prune";
@@ -39,12 +41,16 @@ export function registerHoarderCommands(pi: ExtensionAPI, controller: HoarderCon
         return;
       }
       if (command.kind === "storage") {
-        await selectStorage(
-          controller,
-          command.target,
-          ctx.sessionManager.getSessionId(),
-          ctx.ui.notify,
-        );
+        if (command.target === "s3" && !controller.getStatusSnapshot().config?.s3) {
+          await setupS3(controller, ctx);
+        } else {
+          await selectStorage(
+            controller,
+            command.target,
+            ctx.sessionManager.getSessionId(),
+            ctx.ui.notify,
+          );
+        }
         return;
       }
       await enableGitCatalog(controller, ctx.sessionManager.getSessionId(), ctx.ui.notify);
@@ -126,6 +132,49 @@ async function selectStorage(
   }
 }
 
+async function setupS3(controller: HoarderController, ctx: ExtensionCommandContext): Promise<void> {
+  const sessionId = ctx.sessionManager.getSessionId();
+  if (!ctx.hasUI) {
+    const path =
+      controller.getStatusSnapshot().globalConfigPath ?? "~/.pi/agent/session-hoarder.json";
+    ctx.ui.notify(
+      `Interactive S3 setup requires UI. Configure the global file at ${path} with storageTarget, s3.targetId, s3.bucket, s3.region, s3.prefix, and s3.forcePathStyle, then run /hoarder storage s3 again.`,
+      "error",
+    );
+    return;
+  }
+  try {
+    const prompter = new PiS3SetupPrompter(ctx);
+    const initial = controller.getS3SetupInitial(sessionId);
+    const draft = await prompter.collect(initial);
+    if (!draft) {
+      ctx.ui.notify(
+        "Session Hoarder S3 setup was cancelled; configuration is unchanged.",
+        "warning",
+      );
+      return;
+    }
+    const preview = await controller.prepareS3Setup(draft, sessionId);
+    const choice = await prompter.confirmPreview(preview);
+    if (choice === "cancel") {
+      ctx.ui.notify(
+        "Session Hoarder S3 setup was cancelled; configuration is unchanged.",
+        "warning",
+      );
+      return;
+    }
+    const result = await controller.completeS3Setup(preview, choice, sessionId);
+    ctx.ui.notify(
+      result.verified
+        ? `Session Hoarder verified and selected ${result.target}.`
+        : `Session Hoarder configured and selected ${result.target}; remote verification is pending.`,
+      "info",
+    );
+  } catch (error) {
+    ctx.ui.notify(`Session Hoarder S3 setup failed: ${errorMessage(error)}`, "error");
+  }
+}
+
 async function runPrune(
   controller: HoarderController,
   sessionId: string,
@@ -176,22 +225,6 @@ function formatPruneResult(result: {
     ["Invalid receipts", formatRevision(result.invalidReceiptRecords)],
     ["Interrupted", result.interrupted ? "yes" : "no"],
   ]);
-}
-
-function alignRows(rows: readonly (readonly [string, string])[]): string {
-  const width = Math.max(...rows.map(([label]) => label.length));
-  return rows.map(([label, value]) => `${label.padEnd(width)}: ${value}`).join("\n");
-}
-
-function formatBytes(bytes: number): string {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return unit === 0 ? `${value} B` : `${value.toFixed(1)} ${units[unit]}`;
 }
 
 async function enableGitCatalog(

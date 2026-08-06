@@ -42,6 +42,7 @@ export class ActiveSession {
   readonly sessionFile: string | undefined;
   repository: RepositoryIdentity;
   config?: HoarderConfig;
+  globalConfigPath?: string;
   checkpoint: CheckpointStatus = { state: "pending", dirtyReasons: ["initializing"] };
   record?: SessionArchiveRecord;
   initializationError?: string;
@@ -92,6 +93,7 @@ export class ActiveSession {
       sessionId: this.sessionId,
       repositoryId: this.repository.repositoryId,
       config: this.config,
+      globalConfigPath: this.globalConfigPath,
       checkpoint: this.checkpoint,
       record: this.record,
       initializationError: this.initializationError,

@@ -5,6 +5,7 @@ export interface HoarderStatusSnapshot {
   sessionId?: string;
   repositoryId?: string;
   config?: HoarderConfig;
+  globalConfigPath?: string;
   checkpoint: CheckpointStatus;
   record?: SessionArchiveRecord;
   initializationError?: string;

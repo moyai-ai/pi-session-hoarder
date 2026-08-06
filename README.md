@@ -68,7 +68,7 @@ The following commands are available during the R1 rollout:
 - `/hoarder sync` requests an immediate checkpoint instead of waiting for the normal debounce interval.
 - `/hoarder git enable` enables PR-safe catalog publication for a trusted Git worktree. Hoarder writes the projection but never stages or commits it.
 - `/hoarder storage local` selects local durability without making S3 requests or downloading history.
-- `/hoarder storage s3` selects an already configured S3 target and publishes new local checkpoints to it.
+- `/hoarder storage s3` selects a configured S3 target. When none exists and UI is available, it opens a credential-safe global setup wizard with an optional real upload verification.
 - `/hoarder prune` previews and removes only local CAS objects backed by durable verified receipts for the selected S3 target. It never deletes source sessions, catalogs, receipts, configuration, or remote objects.
 
 ## 3. What is archived
@@ -126,6 +126,15 @@ The local CAS remains the checkpoint and staging path. Verified gzip objects are
 Lazy retrieval verifies encoded transport bytes and the uncompressed logical SHA-256 before atomically reinstalling an object into local CAS. `/hoarder prune` is available only while S3 is selected and removes only exact durable verified receipt-backed local CAS objects after confirmation when UI is available. Prune does not perform a restore round trip first; removed objects become remote-only, and R1 currently has no in-product restore command.
 
 S3 credentials and routing are configured globally. Credentials use the AWS SDK credential chain; project configuration and catalogs never contain credentials and cannot redirect uploads.
+
+When no valid target exists, `/hoarder storage s3` opens a short interactive wizard in TUI/RPC modes. The common AWS path asks for the bucket, region, and credential source. Target naming and object-prefix settings are optional advanced fields; custom endpoints and path-style addressing are requested only for S3-compatible services such as MinIO or RustFS. Uploads always use the bucket's encryption settings and never send a per-request encryption override. The wizard then shows a sanitized target and exact current-session upload-size preview and offers either:
+
+- upload and verify the current content-addressed session objects before atomically saving/selecting the target; or
+- save/select the target without a test and let normal synchronization perform the first verification.
+
+Draft verification receipts are isolated from the final selected target until the global configuration write succeeds. The first normal synchronization after a successful upload test therefore re-verifies the immutable remote bytes under the selected target identity, but it does not upload them again.
+
+The upload choice explicitly warns that private session and allowlisted Bash sidecar bytes will leave the machine. The wizard never requests access keys, secret keys, session tokens, or web-identity tokens. IAM-user access keys remain supported through the standard AWS credential chain: configure them first with `aws configure --profile session-hoarder` and select that named profile, or expose them through the standard AWS environment variables. For IAM Identity Center, run `aws sso login --profile company-sso` and select `company-sso`. Workload roles and the default AWS profile require no profile entry. In headless print/JSON modes the command performs no prompts and no S3 requests, and instead reports the exact global configuration path.
 
 ### 4.3 Git-tracked project catalogs
 
@@ -186,13 +195,12 @@ A global S3 target uses this shape:
     "bucket": "private-pi-sessions",
     "region": "us-east-1",
     "prefix": "session-hoarder",
-    "forcePathStyle": false,
-    "serverSideEncryption": "AES256"
+    "forcePathStyle": false
   }
 }
 ```
 
-Optional S3 fields include `endpoint`, `profile`, and `kmsKeyId`. Credentials are resolved externally and are never stored in Session Hoarder configuration.
+Optional S3 fields include `endpoint` and `profile`. Credentials are resolved externally and are never stored in Session Hoarder configuration. Per-request encryption overrides are not supported; configure encryption on the bucket.
 
 Trusted projects may also provide `.pi/session-hoarder.json`, but project configuration may only change `enabled`, `debounceMs`, `shutdownTimeoutMs`, and `gitCatalogEnabled`. A project cannot redirect the archive location or remote target, and configuration from untrusted projects is ignored.
 

@@ -1,7 +1,12 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { createConfigurationWriter, loadConfig } from "./adapters/config.js";
+import {
+  createConfigurationWriter,
+  createS3TargetDraftValidator,
+  loadConfig,
+} from "./adapters/config.js";
 import { resolveRepositoryIdentity } from "./adapters/identity.js";
 import { LocalGitWorktreeInspector } from "./adapters/git-worktree.js";
 import { PiSessionArtifactDiscovery } from "./adapters/filesystem/artifact-discovery.js";
@@ -98,6 +103,19 @@ export function createPruneApplication(
   });
 }
 
+export function fingerprintDraftTarget(target: S3TargetConfig): string {
+  const identity = JSON.stringify([
+    target.targetId,
+    target.bucket,
+    target.region,
+    target.prefix,
+    target.endpoint ?? "",
+    target.profile ?? "",
+    target.forcePathStyle,
+  ]);
+  return `setup-${createHash("sha256").update(identity).digest("hex").slice(0, 32)}`;
+}
+
 /** Composition root: the only place concrete adapters are wired to Pi entrypoints. */
 export function bootstrapSessionHoarder(pi: ExtensionAPI): void {
   const maintenanceByRoot = new Map<string, SerializedMaintenanceExclusion>();
@@ -119,6 +137,9 @@ export function bootstrapSessionHoarder(pi: ExtensionAPI): void {
     },
     createPruneService: createPruneApplication,
     configurationWriter: createConfigurationWriter(),
+    s3TargetDraftValidator: createS3TargetDraftValidator(),
+    draftReplicationTargetId: fingerprintDraftTarget,
+    defaultS3Region: () => process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-east-1",
     uiScheduler: {
       setInterval: (callback, intervalMs) => setInterval(callback, intervalMs),
       clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),

@@ -57,6 +57,20 @@ function setup(controllerOverrides: Partial<HoarderController> = {}) {
     }),
     sync: async () => ({ checkpoint: { changed: true, record: record() } }),
     selectStorageTarget: async (target) => target,
+    getS3SetupInitial: () => ({
+      globalConfigPath: "/home/test/.pi/agent/session-hoarder.json",
+      targetId: "backup",
+      bucket: "",
+      region: "us-east-1",
+      prefix: "session-hoarder",
+      endpoint: "",
+      profile: "",
+      forcePathStyle: false,
+    }),
+    prepareS3Setup: async () => {
+      throw new Error("not configured for this test");
+    },
+    completeS3Setup: async () => ({ target: "s3:backup", verified: false }),
     enableGitCatalog: async () => undefined,
     prune: async () => ({
       localObjects: 0,
@@ -77,6 +91,30 @@ function setup(controllerOverrides: Partial<HoarderController> = {}) {
   const notify = vi.fn();
   if (!command) throw new Error("command not registered");
   return { command, notify };
+}
+
+function configuredS3Status() {
+  return {
+    sessionId: "session",
+    globalConfigPath: "/home/test/.pi/agent/session-hoarder.json",
+    config: {
+      enabled: true,
+      debounceMs: 30_000,
+      shutdownTimeoutMs: 3_000,
+      storageRoot: "/archive",
+      storageTarget: "local" as const,
+      s3: {
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: "session-hoarder",
+        forcePathStyle: false,
+      },
+      gitCatalogEnabled: false,
+    },
+    checkpoint: { state: "idle" as const, revision: 2 },
+    record: record(),
+  };
 }
 
 describe("/hoarder", () => {
@@ -168,24 +206,35 @@ describe("/hoarder", () => {
     expect(notify).toHaveBeenCalledWith("Session Hoarder sync failed: disk full", "error");
   });
 
-  it.each([
-    ["storage local", "local"],
-    ["storage s3", "s3"],
-  ] as const)("selects storage with %s", async (args, target) => {
-    const selectStorageTarget = vi.fn(async () => (target === "s3" ? "s3:backup" : "local"));
+  it("selects local storage directly", async () => {
+    const selectStorageTarget = vi.fn(async () => "local");
     const { command, notify } = setup({ selectStorageTarget });
     const ctx = {
       ui: { notify },
       sessionManager: { getSessionId: () => "session" },
     } as unknown as ExtensionCommandContext;
 
-    await command.handler(args, ctx);
+    await command.handler("storage local", ctx);
 
-    expect(selectStorageTarget).toHaveBeenCalledWith(target, "session");
-    expect(notify).toHaveBeenCalledWith(
-      `Session Hoarder storage target is now ${target === "s3" ? "s3:backup" : "local"}.`,
-      "info",
-    );
+    expect(selectStorageTarget).toHaveBeenCalledWith("local", "session");
+    expect(notify).toHaveBeenCalledWith("Session Hoarder storage target is now local.", "info");
+  });
+
+  it("selects an existing configured S3 target directly", async () => {
+    const selectStorageTarget = vi.fn(async () => "s3:backup");
+    const { command, notify } = setup({
+      selectStorageTarget,
+      getStatusSnapshot: () => configuredS3Status(),
+    });
+    const ctx = {
+      ui: { notify },
+      sessionManager: { getSessionId: () => "session" },
+    } as unknown as ExtensionCommandContext;
+
+    await command.handler("storage s3", ctx);
+
+    expect(selectStorageTarget).toHaveBeenCalledWith("s3", "session");
+    expect(notify).toHaveBeenCalledWith("Session Hoarder storage target is now s3:backup.", "info");
   });
 
   it("reports local selection only after transition completion", async () => {
@@ -296,8 +345,9 @@ describe("/hoarder", () => {
 
   it("reports storage selection failures", async () => {
     const { command, notify } = setup({
+      getStatusSnapshot: () => configuredS3Status(),
       selectStorageTarget: async () => {
-        throw new Error("No S3 target is configured");
+        throw new Error("configured target unavailable");
       },
     });
     const ctx = {
@@ -308,9 +358,81 @@ describe("/hoarder", () => {
     await command.handler("storage s3", ctx);
 
     expect(notify).toHaveBeenCalledWith(
-      "Session Hoarder storage selection failed: No S3 target is configured",
+      "Session Hoarder storage selection failed: configured target unavailable",
       "error",
     );
+  });
+
+  it("gives headless setup instructions without prompting or preparing remote work", async () => {
+    const prepareS3Setup = vi.fn();
+    const { command, notify } = setup({
+      prepareS3Setup,
+      getStatusSnapshot: () => ({
+        ...configuredS3Status(),
+        config: { ...configuredS3Status().config, s3: undefined },
+        globalConfigPath: "/custom/agent/session-hoarder.json",
+      }),
+    });
+    await command.handler("storage s3", {
+      hasUI: false,
+      ui: { notify },
+      sessionManager: { getSessionId: () => "session" },
+    } as unknown as ExtensionCommandContext);
+
+    expect(prepareS3Setup).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining("Configure the global file at /custom/agent/session-hoarder.json"),
+      "error",
+    );
+  });
+
+  it("runs the interactive setup preview and verified-upload choice", async () => {
+    const preview = {
+      target: {
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: "session-hoarder",
+        forcePathStyle: false,
+      },
+      objectCount: 1,
+      encodedBytes: 50,
+      endpointDisplay: "AWS default",
+      profileDisplay: "default credential chain",
+    };
+    const prepareS3Setup = vi.fn(async () => preview);
+    const completeS3Setup = vi.fn(async () => ({ target: "s3:backup", verified: true }));
+    const { command, notify } = setup({ prepareS3Setup, completeS3Setup });
+    const inputs = ["private-bucket", "us-east-1"];
+    const input = vi.fn(async () => inputs.shift());
+    const select = vi
+      .fn()
+      .mockResolvedValueOnce("AWS S3")
+      .mockResolvedValueOnce("Default AWS credential chain")
+      .mockResolvedValueOnce("Use default target name and object prefix")
+      .mockResolvedValueOnce("Upload current session objects, verify, and save");
+    const confirm = vi.fn(async () => true);
+
+    await command.handler("storage s3", {
+      hasUI: true,
+      ui: { notify, input, select, confirm },
+      sessionManager: { getSessionId: () => "session" },
+    } as unknown as ExtensionCommandContext);
+
+    expect(prepareS3Setup).toHaveBeenCalledWith(
+      expect.objectContaining({ bucket: "private-bucket" }),
+      "session",
+    );
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining("Upload test: 1 object(s), 50 B"),
+      "info",
+    );
+    expect(confirm).toHaveBeenCalledWith(
+      "Upload private Session Hoarder data?",
+      expect.stringContaining("private Pi session and allowlisted sidecar bytes"),
+    );
+    expect(completeS3Setup).toHaveBeenCalledWith(preview, "upload-and-save", "session");
+    expect(notify).toHaveBeenCalledWith("Session Hoarder verified and selected s3:backup.", "info");
   });
 
   it("rejects unsupported subcommands", async () => {

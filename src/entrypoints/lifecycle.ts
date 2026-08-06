@@ -22,6 +22,19 @@ import type {
   S3TargetConfig,
   StorageTarget,
 } from "../application/configuration.js";
+import {
+  categorizeS3SetupError,
+  sanitizedEndpointDisplay,
+  sanitizedProfileDisplay,
+} from "../application/s3-setup-presentation.js";
+import {
+  setupDraftFromTarget,
+  type S3SetupChoice,
+  type S3SetupDraft,
+  type S3SetupInitial,
+  type S3SetupPreview,
+  type S3TargetDraftValidator,
+} from "../application/s3-setup.js";
 import type { HoarderStatusSnapshot } from "../application/status.js";
 import type { MaintenanceExclusion } from "../application/maintenance-exclusion.js";
 import type { PruneConfirmation } from "../application/prune-ports.js";
@@ -31,7 +44,7 @@ import type {
   ProjectCatalogApplicationService,
   PublishProjectCatalogResult,
 } from "../application/project-catalog.js";
-import type { RepositoryIdentity } from "../domain/model.js";
+import type { RepositoryIdentity, SessionArchiveRecord } from "../domain/model.js";
 import { ActiveSession, type ActiveSessionHost, type UiScheduler } from "./active-session.js";
 
 export type { UiScheduler } from "./active-session.js";
@@ -44,10 +57,22 @@ export interface HoarderSyncResult {
   projectionError?: string;
 }
 
+export interface CompleteS3SetupResult {
+  target: string;
+  verified: boolean;
+}
+
 export interface HoarderController {
   getStatusSnapshot(): HoarderStatusSnapshot;
   sync(expectedSessionId?: string): Promise<HoarderSyncResult>;
   selectStorageTarget(target: StorageTarget, expectedSessionId?: string): Promise<string>;
+  getS3SetupInitial(expectedSessionId?: string): S3SetupInitial;
+  prepareS3Setup(draft: S3SetupDraft, expectedSessionId?: string): Promise<S3SetupPreview>;
+  completeS3Setup(
+    preview: S3SetupPreview,
+    choice: Exclude<S3SetupChoice, "cancel">,
+    expectedSessionId?: string,
+  ): Promise<CompleteS3SetupResult>;
   enableGitCatalog(expectedSessionId?: string): Promise<void>;
   prune(confirmation?: PruneConfirmation, expectedSessionId?: string): Promise<PruneResult>;
 }
@@ -74,6 +99,9 @@ export interface LifecycleDependencies {
     exclusion: MaintenanceExclusion,
   ): PruneApplicationService;
   configurationWriter: ConfigurationWriter;
+  s3TargetDraftValidator: S3TargetDraftValidator;
+  draftReplicationTargetId(target: S3TargetConfig): string;
+  defaultS3Region(): string;
   uiScheduler: UiScheduler;
 }
 
@@ -179,6 +207,113 @@ export class HoarderLifecycle implements HoarderController {
     return target === "s3" ? `s3:${runtime.config.s3!.targetId}` : "local";
   }
 
+  getS3SetupInitial(expectedSessionId?: string): S3SetupInitial {
+    const runtime = this.requireCurrentRuntime(expectedSessionId, "S3 setup");
+    if (!runtime.config || !runtime.globalConfigPath) {
+      throw new Error("Session Hoarder configuration is unavailable.");
+    }
+    return setupDraftFromTarget(
+      runtime.config.s3,
+      runtime.globalConfigPath,
+      this.dependencies.defaultS3Region(),
+    );
+  }
+
+  async prepareS3Setup(draft: S3SetupDraft, expectedSessionId?: string): Promise<S3SetupPreview> {
+    const runtime = this.requireCurrentRuntime(expectedSessionId, "S3 setup");
+    if (!runtime.config) throw new Error("Session Hoarder configuration is unavailable.");
+    const target = this.dependencies.s3TargetDraftValidator.validate(draft);
+    if (!runtime.coordinator) {
+      throw new Error(runtime.initializationError ?? "Session Hoarder is disabled.");
+    }
+    await runtime.coordinator.flush("s3-setup-preview");
+    if (!this.isRuntimeCurrent(runtime)) {
+      throw new Error("The active Pi session changed before S3 setup could continue.");
+    }
+    if (!runtime.record)
+      throw new Error("No committed local checkpoint is available for S3 setup.");
+    const objects = uniqueArchiveObjects(runtime.record);
+    return {
+      target: structuredClone(target),
+      objectCount: objects.length,
+      encodedBytes: objects.reduce((total, object) => total + object.storedBytes, 0),
+      endpointDisplay: sanitizedEndpointDisplay(target.endpoint),
+      profileDisplay: sanitizedProfileDisplay(target.profile),
+    };
+  }
+
+  async completeS3Setup(
+    preview: S3SetupPreview,
+    choice: Exclude<S3SetupChoice, "cancel">,
+    expectedSessionId?: string,
+  ): Promise<CompleteS3SetupResult> {
+    const runtime = this.requireCurrentRuntime(expectedSessionId, "S3 setup");
+    if (!runtime.config || !runtime.record) {
+      throw new Error("Session Hoarder configuration or local checkpoint is unavailable.");
+    }
+    const target = this.dependencies.s3TargetDraftValidator.validate({
+      targetId: preview.target.targetId,
+      bucket: preview.target.bucket,
+      region: preview.target.region,
+      prefix: preview.target.prefix,
+      endpoint: preview.target.endpoint ?? "",
+      profile: preview.target.profile ?? "",
+      forcePathStyle: preview.target.forcePathStyle,
+    });
+    const verified = choice === "upload-and-save";
+    if (verified) await this.verifyDraftTarget(runtime, target);
+    this.assertSetupRuntimeCurrent(runtime, "saved");
+    await this.dependencies.configurationWriter.configureAndSelectS3(target);
+    this.assertSetupRuntimeCurrent(runtime, "activated");
+    this.activateS3Target(runtime, target);
+    return { target: `s3:${target.targetId}`, verified };
+  }
+
+  private async verifyDraftTarget(runtime: ActiveSession, target: S3TargetConfig): Promise<void> {
+    const draftTarget = {
+      ...target,
+      targetId: this.dependencies.draftReplicationTargetId(target),
+    };
+    const service = this.dependencies.createReplicationService(
+      runtime.config!.storageRoot,
+      draftTarget,
+    );
+    let failure: string | undefined;
+    try {
+      const result = await this.exclusionFor(runtime).runActivity(() =>
+        service.sync({
+          targetId: draftTarget.targetId,
+          repositoryId: runtime.repository.repositoryId,
+          sessionId: runtime.sessionId,
+        }),
+      );
+      if (!result || result.record.revision < runtime.record!.revision) {
+        failure = "draft target verification did not cover the current local revision";
+      }
+    } catch (error) {
+      failure = categorizeS3SetupError(error);
+    }
+    if (failure) throw new Error(`S3 target verification failed: ${failure}.`);
+  }
+
+  private assertSetupRuntimeCurrent(runtime: ActiveSession, action: string): void {
+    if (!this.isRuntimeCurrent(runtime)) {
+      throw new Error(`The active Pi session changed before S3 setup could be ${action}.`);
+    }
+  }
+
+  private activateS3Target(runtime: ActiveSession, target: S3TargetConfig): void {
+    runtime.config = { ...runtime.config!, storageTarget: "s3", s3: target };
+    if (runtime.config.gitCatalogEnabled && runtime.isProjectTrusted) {
+      runtime.projectCatalogService = this.dependencies.createProjectCatalogService(
+        runtime.config.storageRoot,
+        target,
+      );
+    }
+    this.configureReplication(runtime);
+    runtime.updateUi();
+  }
+
   async prune(confirmation?: PruneConfirmation, expectedSessionId?: string): Promise<PruneResult> {
     const runtime = this.requireCurrentRuntime(expectedSessionId, "prune");
     if (!runtime.config || runtime.config.storageTarget !== "s3" || !runtime.config.s3) {
@@ -250,6 +385,7 @@ export class HoarderLifecycle implements HoarderController {
         isProjectTrusted: runtime.isProjectTrusted,
       });
       runtime.config = configResult.config;
+      runtime.globalConfigPath = configResult.paths.global;
       runtime.configurationWarning = configResult.ok ? configResult.warning?.message : undefined;
       if (!configResult.ok) {
         runtime.failConfiguration(configResult);
@@ -517,6 +653,17 @@ function syncResultWithProjection(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function uniqueArchiveObjects(
+  record: SessionArchiveRecord,
+): readonly SessionArchiveRecord["sessionObject"][] {
+  const objects = new Map<string, SessionArchiveRecord["sessionObject"]>();
+  objects.set(record.sessionObject.digest, record.sessionObject);
+  for (const artifact of record.artifacts) {
+    if (artifact.object) objects.set(artifact.object.digest, artifact.object);
+  }
+  return [...objects.values()];
 }
 
 function createActiveSessionHost(ctx: ExtensionContext): ActiveSessionHost {

@@ -13,6 +13,7 @@ import {
 } from "../../src/application/replication-coordinator.js";
 import { SerializedMaintenanceExclusion } from "../../src/application/maintenance-exclusion.js";
 import type { ReplicationApplicationService } from "../../src/application/replication-service.js";
+import { createS3TargetDraftValidator } from "../../src/adapters/config.js";
 import { LocalFileObjectStore } from "../../src/adapters/filesystem/local-object-store.js";
 import { LocalSessionReplicaRepository } from "../../src/adapters/filesystem/local-session-replica-repository.js";
 import { createLocalCheckpointApplication, createPruneApplication } from "../../src/bootstrap.js";
@@ -171,9 +172,13 @@ async function fixture(
     createMaintenanceExclusion: () => new SerializedMaintenanceExclusion(),
     createPruneService: vi.fn(() => ({ prune: vi.fn() }) as never),
     configurationWriter: {
+      configureAndSelectS3: vi.fn(async () => undefined),
       selectStorageTarget: vi.fn(async () => undefined),
       enableGitCatalog: vi.fn(async () => undefined),
     },
+    s3TargetDraftValidator: createS3TargetDraftValidator(),
+    draftReplicationTargetId: () => "setup-draft-target",
+    defaultS3Region: () => "us-east-1",
     uiScheduler,
   };
   return { directory, storageRoot, config, dependencies, uiScheduler };
@@ -689,6 +694,176 @@ describe("HoarderLifecycle", () => {
     expect(remoteSync).toHaveBeenCalled();
     await lifecycle.selectStorageTarget("local", "session");
     expect(lifecycle.getStatusSnapshot().remoteState).toBe("off");
+  });
+
+  it("prepares an S3 setup preview from a committed local checkpoint without constructing remote behavior", async () => {
+    const { directory, dependencies } = await fixture();
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+
+    const preview = await lifecycle.prepareS3Setup(
+      {
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: " /team//sessions/ ",
+        endpoint: "",
+        profile: "",
+        forcePathStyle: false,
+      },
+      "session",
+    );
+
+    expect(preview).toMatchObject({
+      target: { targetId: "backup", prefix: "team/sessions" },
+      objectCount: 1,
+      endpointDisplay: "AWS default",
+      profileDisplay: "default credential chain",
+    });
+    expect(preview.encodedBytes).toBeGreaterThan(0);
+    expect(dependencies.createReplicationService).not.toHaveBeenCalled();
+    expect(dependencies.configurationWriter.configureAndSelectS3).not.toHaveBeenCalled();
+  });
+
+  it("verifies an unpersisted draft only after confirmation, then atomically saves and activates it", async () => {
+    const { directory, dependencies } = await fixture();
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const remoteSync = vi.fn(async ({ targetId, repositoryId, sessionId }) => ({
+      changed: true,
+      record: {
+        schemaVersion: 1 as const,
+        targetId,
+        repositoryId,
+        sessionId,
+        revision: 1,
+        objects: [],
+        verifiedAt: "2026-08-06T12:00:00.000Z",
+      },
+    }));
+    dependencies.createReplicationService = vi.fn(
+      () => ({ sync: remoteSync }) as unknown as ReplicationApplicationService,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    const preview = await lifecycle.prepareS3Setup(
+      {
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: "session-hoarder",
+        endpoint: "",
+        profile: "",
+        forcePathStyle: false,
+      },
+      "session",
+    );
+
+    const result = await lifecycle.completeS3Setup(preview, "upload-and-save", "session");
+
+    expect(result).toEqual({ target: "s3:backup", verified: true });
+    expect(remoteSync).toHaveBeenCalledOnce();
+    expect(dependencies.configurationWriter.configureAndSelectS3).toHaveBeenCalledWith(
+      preview.target,
+    );
+    expect(lifecycle.getStatusSnapshot().config).toMatchObject({
+      storageTarget: "s3",
+      s3: { targetId: "backup" },
+    });
+  });
+
+  it("does not persist or activate a draft when verification fails and hides unsafe errors", async () => {
+    const { directory, dependencies } = await fixture();
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    dependencies.createReplicationService = vi.fn(
+      () =>
+        ({
+          sync: vi.fn(async () => {
+            throw Object.assign(new Error("Authorization=secret"), {
+              details: { statusCode: 403, sourceName: "AccessDenied" },
+            });
+          }),
+        }) as unknown as ReplicationApplicationService,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    const preview = await lifecycle.prepareS3Setup(
+      {
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: "session-hoarder",
+        endpoint: "",
+        profile: "",
+        forcePathStyle: false,
+      },
+      "session",
+    );
+
+    let failure: unknown;
+    try {
+      await lifecycle.completeS3Setup(preview, "upload-and-save", "session");
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("not authorized");
+    expect((failure as Error).message).not.toContain("Authorization=secret");
+    expect(dependencies.configurationWriter.configureAndSelectS3).not.toHaveBeenCalled();
+    expect(lifecycle.getStatusSnapshot().config?.storageTarget).toBe("local");
+  });
+
+  it("saves without a draft upload and queues normal synchronization", async () => {
+    const { directory, dependencies } = await fixture();
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    const preview = await lifecycle.prepareS3Setup(
+      {
+        targetId: "backup",
+        bucket: "private-bucket",
+        region: "us-east-1",
+        prefix: "session-hoarder",
+        endpoint: "",
+        profile: "",
+        forcePathStyle: false,
+      },
+      "session",
+    );
+
+    await expect(
+      lifecycle.completeS3Setup(preview, "save-without-test", "session"),
+    ).resolves.toEqual({ target: "s3:backup", verified: false });
+    expect(dependencies.configurationWriter.configureAndSelectS3).toHaveBeenCalledOnce();
+    expect(dependencies.createReplicationService).toHaveBeenCalledOnce();
   });
 
   it("refuses to select S3 before a global target is configured", async () => {

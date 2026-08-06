@@ -13,9 +13,10 @@ import type {
   ConfigurationWriter,
   HoarderConfig,
   S3TargetConfig,
-  ServerSideEncryption,
   StorageTarget,
 } from "../application/configuration.js";
+import type { S3SetupDraft, S3TargetDraftValidator } from "../application/s3-setup.js";
+import { normalizeS3Prefix } from "../application/s3-target.js";
 import { atomicWriteFile, serializeFileOperation } from "./filesystem/atomic-file.js";
 
 export const DEFAULT_CONFIG = Object.freeze({
@@ -138,6 +139,15 @@ export function createConfigurationWriter(
 ): ConfigurationWriter {
   const dependencies = { ...defaultWriterDependencies, ...dependencyOverrides };
   return {
+    configureAndSelectS3: async (target) => {
+      const path = join(dependencies.agentDir, CONFIG_FILE_NAME);
+      const validated = validateS3TargetObject({ ...target });
+      await mutateConfigFile(path, dependencies, (config) => ({
+        ...config,
+        s3: validated,
+        storageTarget: "s3",
+      }));
+    },
     selectStorageTarget: async (target) => {
       const path = join(dependencies.agentDir, CONFIG_FILE_NAME);
       await mutateConfigFile(path, dependencies, (config) => ({
@@ -382,7 +392,26 @@ function optionalS3Target(config: Record<string, unknown>): S3TargetConfig | und
   if (!isPlainObject(config.s3)) {
     throw new Error('Global Session Hoarder config "s3" must be a JSON object.');
   }
-  const s3 = config.s3;
+  return validateS3TargetObject(config.s3);
+}
+
+export function createS3TargetDraftValidator(): S3TargetDraftValidator {
+  return { validate: validateS3SetupDraft };
+}
+
+export function validateS3SetupDraft(draft: S3SetupDraft): S3TargetConfig {
+  return validateS3TargetObject({
+    targetId: draft.targetId,
+    bucket: draft.bucket,
+    region: draft.region,
+    prefix: draft.prefix,
+    ...(draft.endpoint.trim() ? { endpoint: draft.endpoint } : {}),
+    ...(draft.profile.trim() ? { profile: draft.profile } : {}),
+    forcePathStyle: draft.forcePathStyle,
+  });
+}
+
+function validateS3TargetObject(s3: Record<string, unknown>): S3TargetConfig {
   validateS3Keys(s3);
   const targetId = requiredString(s3, "targetId");
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(targetId)) {
@@ -390,18 +419,23 @@ function optionalS3Target(config: Record<string, unknown>): S3TargetConfig | und
       'Global Session Hoarder config "s3.targetId" must be a filesystem-safe name of at most 64 characters.',
     );
   }
+  const bucket = safeRequiredString(s3, "bucket", 255);
+  const region = safeRequiredString(s3, "region", 128);
   const endpoint = optionalEndpoint(s3);
-  const serverSideEncryption = optionalEncryption(s3);
+  const profile = optionalSafeString(s3, "profile", 128);
+  if (profile && !/^[A-Za-z0-9][A-Za-z0-9_+=,.@-]{0,127}$/.test(profile)) {
+    throw new Error(
+      'Global Session Hoarder config "s3.profile" must be a safe AWS profile name of at most 128 characters.',
+    );
+  }
   return {
     targetId,
-    bucket: requiredString(s3, "bucket"),
-    region: requiredString(s3, "region"),
-    prefix: normalizePrefix(optionalString(s3, "prefix") ?? "session-hoarder"),
+    bucket,
+    region,
+    prefix: normalizeS3Prefix(optionalString(s3, "prefix") ?? "session-hoarder"),
     forcePathStyle: optionalBooleanField(s3, "forcePathStyle") ?? false,
     ...(endpoint ? { endpoint } : {}),
-    ...(optionalString(s3, "profile") ? { profile: optionalString(s3, "profile") } : {}),
-    ...(serverSideEncryption ? { serverSideEncryption } : {}),
-    ...(optionalString(s3, "kmsKeyId") ? { kmsKeyId: optionalString(s3, "kmsKeyId") } : {}),
+    ...(profile ? { profile } : {}),
   };
 }
 
@@ -414,8 +448,6 @@ function validateS3Keys(config: Record<string, unknown>): void {
     "endpoint",
     "profile",
     "forcePathStyle",
-    "serverSideEncryption",
-    "kmsKeyId",
   ]);
   for (const key of Object.keys(config)) {
     if (!allowed.has(key))
@@ -440,6 +472,35 @@ function optionalString(config: Record<string, unknown>, key: string): string | 
   return value.trim();
 }
 
+function safeRequiredString(
+  config: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+): string {
+  const value = requiredString(config, key);
+  assertSafeS3String(value, key, maxLength);
+  return value;
+}
+
+function optionalSafeString(
+  config: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+): string | undefined {
+  const value = optionalString(config, key);
+  if (!value) return undefined;
+  assertSafeS3String(value, key, maxLength);
+  return value;
+}
+
+function assertSafeS3String(value: string, key: string, maxLength: number): void {
+  if (value.length > maxLength || /\p{Cc}/u.test(value)) {
+    throw new Error(
+      `Global Session Hoarder config "s3.${key}" must not contain control characters and must be at most ${maxLength} characters.`,
+    );
+  }
+}
+
 function optionalBooleanField(config: Record<string, unknown>, key: string): boolean | undefined {
   if (!(key in config)) return undefined;
   if (typeof config[key] !== "boolean") {
@@ -460,22 +521,12 @@ function optionalEndpoint(config: Record<string, unknown>): string | undefined {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error('Global Session Hoarder config "s3.endpoint" must be an absolute HTTP(S) URL.');
   }
-  return url.toString().replace(/\/$/, "");
-}
-
-function optionalEncryption(config: Record<string, unknown>): ServerSideEncryption | undefined {
-  if (!("serverSideEncryption" in config)) return undefined;
-  const value = config.serverSideEncryption;
-  if (value !== "AES256" && value !== "aws:kms") {
+  if (url.username || url.password || url.search || url.hash) {
     throw new Error(
-      'Global Session Hoarder config "s3.serverSideEncryption" must be "AES256" or "aws:kms".',
+      'Global Session Hoarder config "s3.endpoint" must not contain userinfo, query parameters, or a fragment.',
     );
   }
-  return value;
-}
-
-function normalizePrefix(value: string): string {
-  return value.replace(/^\/+|\/+$/g, "");
+  return url.toString().replace(/\/$/, "");
 }
 
 function validateMilliseconds(value: unknown, key: string, scope: ConfigScope): number {
