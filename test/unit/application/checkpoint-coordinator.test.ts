@@ -41,7 +41,7 @@ class FakeScheduler implements CoordinatorScheduler {
 function record(revision: number): SessionArchiveRecord {
   const digest = "a".repeat(64);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     repositoryId: "repo",
     sessionId: "session",
     revision,
@@ -52,7 +52,6 @@ function record(revision: number): SessionArchiveRecord {
       encoding: "gzip",
       logicalBytes: revision,
       storedBytes: revision,
-      relativePath: `objects/${digest}.gz`,
     },
     artifacts: [],
     capturedAt: `2026-08-03T00:00:0${revision}.000Z`,
@@ -106,7 +105,8 @@ describe("CheckpointCoordinator", () => {
   it("never overlaps runs and schedules one follow-up for changes during a run", async () => {
     const first = deferred<CheckpointSessionResult>();
     const second = deferred<CheckpointSessionResult>();
-    const run = vi.fn()
+    const run = vi
+      .fn()
       .mockImplementationOnce(() => first.promise)
       .mockImplementationOnce(() => second.promise);
     const coordinator = new CheckpointCoordinator({
@@ -129,7 +129,8 @@ describe("CheckpointCoordinator", () => {
   });
 
   it("keeps failures retryable", async () => {
-    const run = vi.fn()
+    const run = vi
+      .fn()
       .mockRejectedValueOnce(Object.assign(new Error("disk full"), { code: "ENOSPC" }))
       .mockResolvedValueOnce(result(1));
     const coordinator = new CheckpointCoordinator({

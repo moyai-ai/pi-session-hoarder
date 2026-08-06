@@ -1,5 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 async function sourceFiles(directory: string): Promise<string[]> {
@@ -27,8 +27,13 @@ async function importsUnder(directory: string): Promise<Array<{ path: string; so
 describe("architectural dependency rules", () => {
   it("keeps the domain independent of application, adapters, Pi, and Node I/O", async () => {
     const imports = await importsUnder("src/domain");
+    const domainRoot = `${resolve("src/domain")}${sep}`;
+    const forbidden = imports.filter(({ path, source }) => {
+      if (!source.startsWith(".")) return true;
+      return !resolve(dirname(path), source).startsWith(domainRoot);
+    });
 
-    expect(imports).toEqual([]);
+    expect(forbidden).toEqual([]);
   });
 
   it("keeps the application layer independent of adapters and Pi entrypoints", async () => {
@@ -55,8 +60,7 @@ describe("architectural dependency rules", () => {
     const imports = await importsUnder("src/entrypoints");
     const forbidden = imports.filter(
       ({ path, source }) =>
-        path.endsWith("active-session.ts") &&
-        source === "@earendil-works/pi-coding-agent",
+        path.endsWith("active-session.ts") && source === "@earendil-works/pi-coding-agent",
     );
 
     expect(forbidden).toEqual([]);

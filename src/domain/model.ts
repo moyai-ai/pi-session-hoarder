@@ -1,8 +1,7 @@
 export type RepositoryIdentityKind = "git-remote" | "git-root" | "cwd";
 
 /** Canonical UTC format emitted by Date#toISOString(). */
-export const UTC_TIMESTAMP_PATTERN =
-  "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$";
+export const UTC_TIMESTAMP_PATTERN = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$";
 const UTC_TIMESTAMP_REGEX = new RegExp(UTC_TIMESTAMP_PATTERN);
 
 export interface RepositoryIdentity {
@@ -22,7 +21,16 @@ export interface ObjectReference {
   encoding: "gzip";
   logicalBytes: number;
   storedBytes: number;
-  relativePath: string;
+}
+
+export function sameObjectReference(left: ObjectReference, right: ObjectReference): boolean {
+  return (
+    left.algorithm === right.algorithm &&
+    left.digest === right.digest &&
+    left.encoding === right.encoding &&
+    left.logicalBytes === right.logicalBytes &&
+    left.storedBytes === right.storedBytes
+  );
 }
 
 export type ArtifactRelationState = "captured" | "missing" | "invalid";
@@ -60,7 +68,7 @@ export interface CheckpointError {
 }
 
 export interface SessionArchiveRecord extends CheckpointRevision, SessionIdentity {
-  schemaVersion: 1;
+  schemaVersion: 2;
   lastError?: CheckpointError;
 }
 
@@ -114,14 +122,14 @@ export class SessionArchive {
   isSourceCurrent(source: Pick<SourceSnapshot, "size" | "mtimeMs">): boolean {
     return Boolean(
       this.current &&
-        this.current.source.size === source.size &&
-        this.current.source.mtimeMs === source.mtimeMs,
+      this.current.source.size === source.size &&
+      this.current.source.mtimeMs === source.mtimeMs,
     );
   }
 
   recordCheckpoint(input: RecordCheckpointInput): SessionArchiveRecord {
     const record: SessionArchiveRecord = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       ...this.identity,
       revision: this.revision + 1,
       source: structuredClone(input.source),
@@ -178,12 +186,14 @@ function assertRecordInvariants(record: SessionArchiveRecord): void {
 }
 
 function assertRecordTimestamps(record: SessionArchiveRecord): void {
-  assertUtcTimestamp(record.capturedAt, "capturedAt");
-  assertUtcTimestamp(record.lastVerifiedAt, "lastVerifiedAt");
-  if (record.lastError) assertUtcTimestamp(record.lastError.occurredAt, "lastError.occurredAt");
+  assertCanonicalUtcTimestamp(record.capturedAt, "capturedAt");
+  assertCanonicalUtcTimestamp(record.lastVerifiedAt, "lastVerifiedAt");
+  if (record.lastError) {
+    assertCanonicalUtcTimestamp(record.lastError.occurredAt, "lastError.occurredAt");
+  }
 }
 
-function assertUtcTimestamp(value: string, field: string): void {
+export function assertCanonicalUtcTimestamp(value: string, field: string): void {
   if (!UTC_TIMESTAMP_REGEX.test(value)) {
     throw new Error(`${field} must be a canonical UTC ISO 8601 timestamp.`);
   }

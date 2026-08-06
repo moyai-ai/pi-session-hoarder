@@ -3,6 +3,7 @@ import type {
   CheckpointUnitOfWorkFactory,
   ObjectStore,
 } from "../../application/ports.js";
+import { ExplicitCommitState } from "./explicit-commit-state.js";
 import { LocalFileObjectStore } from "./local-object-store.js";
 import {
   LocalSessionArchiveRepository,
@@ -16,8 +17,7 @@ import {
 export class LocalCheckpointUnitOfWork implements CheckpointUnitOfWork {
   readonly archives: LocalSessionArchiveRepository;
   readonly objects: ObjectStore;
-  private committed = false;
-  private disposed = false;
+  private readonly state = new ExplicitCommitState();
 
   constructor(archives: LocalSessionArchiveRepository, objects: ObjectStore) {
     this.archives = archives;
@@ -25,10 +25,12 @@ export class LocalCheckpointUnitOfWork implements CheckpointUnitOfWork {
   }
 
   async commit(): Promise<void> {
-    this.assertOpen();
+    this.state.assertOpen();
     const staged = this.archives.staged();
     if (staged.length !== 1) {
-      throw new Error(`A checkpoint Unit of Work must commit exactly one aggregate; received ${staged.length}.`);
+      throw new Error(
+        `A checkpoint Unit of Work must commit exactly one aggregate; received ${staged.length}.`,
+      );
     }
     const [archive] = staged;
     for (const object of archive!.referencedObjects()) {
@@ -38,23 +40,15 @@ export class LocalCheckpointUnitOfWork implements CheckpointUnitOfWork {
     }
     await this.archives.persist(archive!);
     this.archives.clear();
-    this.committed = true;
+    this.state.markCommitted();
   }
 
-  async rollback(): Promise<void> {
-    if (this.disposed) return;
-    this.archives.clear();
+  rollback(): Promise<void> {
+    return this.state.rollback(() => this.archives.clear());
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
-    if (!this.committed) await this.rollback();
-    this.disposed = true;
-  }
-
-  private assertOpen(): void {
-    if (this.disposed) throw new Error("Unit of Work is already disposed.");
-    if (this.committed) throw new Error("Unit of Work is already committed.");
+  dispose(): Promise<void> {
+    return this.state.dispose(() => this.rollback());
   }
 }
 

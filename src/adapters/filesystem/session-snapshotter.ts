@@ -74,4 +74,3 @@ export class LocalSessionSnapshotter implements SessionSnapshotter {
     }
   }
 }
-

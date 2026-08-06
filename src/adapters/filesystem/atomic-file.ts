@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 
 import { unlinkIfExists } from "./file-errors.js";
 
+const fileOperationQueues = new Map<string, Promise<unknown>>();
+
 export async function atomicWriteFile(
   destinationPath: string,
   data: string | Uint8Array,
@@ -29,7 +31,18 @@ export async function atomicWriteFile(
   }
 }
 
-async function syncDirectoryBestEffort(directory: string): Promise<void> {
+export function serializeFileOperation<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  const previous = fileOperationQueues.get(path) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(operation);
+  fileOperationQueues.set(path, next);
+  const cleanup = () => {
+    if (fileOperationQueues.get(path) === next) fileOperationQueues.delete(path);
+  };
+  void next.then(cleanup, cleanup);
+  return next;
+}
+
+export async function syncDirectoryBestEffort(directory: string): Promise<void> {
   try {
     const handle = await open(directory, "r");
     try {
@@ -41,4 +54,3 @@ async function syncDirectoryBestEffort(directory: string): Promise<void> {
     // Some platforms do not support opening or syncing directories.
   }
 }
-

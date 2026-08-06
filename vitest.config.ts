@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
+    exclude: ["test/s3/**/*.test.ts"],
     coverage: {
       provider: "istanbul",
       reportsDirectory: "coverage",

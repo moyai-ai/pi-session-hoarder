@@ -9,7 +9,9 @@ const temporaryDirectories: string[] = [];
 const discovery = new PiSessionArtifactDiscovery();
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 
 async function fixture(lines: unknown[]) {
@@ -39,7 +41,11 @@ describe("discoverArtifacts", () => {
         JSON.stringify({ type: "session", version: 3 }),
         JSON.stringify(toolResult("allowed", { fullOutputPath: output, unrelatedPath: "/secret" })),
         JSON.stringify(toolResult("wrong-tool", { fullOutputPath: "/secret" }, "read")),
-        JSON.stringify({ type: "message", id: "custom", message: { role: "custom", details: { fullOutputPath: "/secret" } } }),
+        JSON.stringify({
+          type: "message",
+          id: "custom",
+          message: { role: "custom", details: { fullOutputPath: "/secret" } },
+        }),
         JSON.stringify(toolResult("nested", { nested: { fullOutputPath: "/secret" } })),
       ].join("\n") + "\n",
     );

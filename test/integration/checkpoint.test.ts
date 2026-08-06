@@ -11,7 +11,9 @@ import { LocalSessionArchiveRepository } from "../../src/adapters/filesystem/loc
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 
 async function fixture() {
@@ -28,7 +30,11 @@ async function fixture() {
     objectStore: application.unitOfWorkFactory.objectStore,
     repository,
     checkpoint: application.service,
-    request: { repositoryId: "repo", sessionId: "session", sessionFile: join(directory, "session.jsonl") },
+    request: {
+      repositoryId: "repo",
+      sessionId: "session",
+      sessionFile: join(directory, "session.jsonl"),
+    },
   };
 }
 
@@ -65,9 +71,13 @@ describe("CheckpointService", () => {
     expect(result.changed).toBe(true);
     expect(result.record.revision).toBe(1);
     expect(result.record.artifacts).toHaveLength(2);
-    expect(result.record.artifacts[0]?.object?.digest).toBe(result.record.artifacts[1]?.object?.digest);
+    expect(result.record.artifacts[0]?.object?.digest).toBe(
+      result.record.artifacts[1]?.object?.digest,
+    );
     expect((await context.objectStore.verify(result.record.sessionObject)).valid).toBe(true);
-    expect((await context.objectStore.verify(result.record.artifacts[0]!.object!)).valid).toBe(true);
+    expect((await context.objectStore.verify(result.record.artifacts[0]!.object!)).valid).toBe(
+      true,
+    );
     const persisted = await context.repository.get(context.request);
     expect(persisted?.record).toEqual(result.record);
   });
@@ -105,19 +115,29 @@ describe("CheckpointService", () => {
     for await (const chunk of context.objectStore.openDecoded(second.record.sessionObject)) {
       decoded.push(Buffer.from(chunk));
     }
-    expect(Buffer.concat(decoded).toString("utf8")).toBe(await readFile(context.sessionFile, "utf8"));
+    expect(Buffer.concat(decoded).toString("utf8")).toBe(
+      await readFile(context.sessionFile, "utf8"),
+    );
   });
 
   it("preserves embedded image blocks as part of the immutable session bytes", async () => {
     const context = await fixture();
-    const session = `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n${JSON.stringify({
-      type: "message",
-      id: "image",
-      message: {
-        role: "user",
-        content: [{ type: "image", data: Buffer.from("image-bytes").toString("base64"), mimeType: "image/png" }],
+    const session = `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n${JSON.stringify(
+      {
+        type: "message",
+        id: "image",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              data: Buffer.from("image-bytes").toString("base64"),
+              mimeType: "image/png",
+            },
+          ],
+        },
       },
-    })}\n`;
+    )}\n`;
     await writeFile(context.sessionFile, session);
 
     const result = required(await context.checkpoint.checkpoint(context.request));
@@ -164,7 +184,10 @@ describe("CheckpointService", () => {
 
     expect(result.changed).toBe(true);
     expect(result.record.artifacts).toHaveLength(1);
-    expect(result.record.artifacts[0]).toMatchObject({ state: "missing", sourceEntryId: "missing" });
+    expect(result.record.artifacts[0]).toMatchObject({
+      state: "missing",
+      sourceEntryId: "missing",
+    });
   });
 });
 

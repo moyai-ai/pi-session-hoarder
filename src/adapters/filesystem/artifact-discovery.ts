@@ -33,6 +33,7 @@ export class PiSessionArtifactDiscovery implements ArtifactDiscovery {
         } catch (error) {
           throw new Error(
             `Invalid Pi session JSONL at line ${lineNumber}: ${errorMessage(error)}`,
+            { cause: error },
           );
         }
         const candidate = getBashFullOutputCandidate(entry);
@@ -88,7 +89,8 @@ function getBashFullOutputCandidate(
 function getMessageEntry(
   value: unknown,
 ): { id: string; message: Record<string, unknown> } | undefined {
-  if (!isRecord(value) || value.type !== "message" || typeof value.id !== "string") return undefined;
+  if (!isRecord(value) || value.type !== "message" || typeof value.id !== "string")
+    return undefined;
   return isRecord(value.message) ? { id: value.id, message: value.message } : undefined;
 }
 

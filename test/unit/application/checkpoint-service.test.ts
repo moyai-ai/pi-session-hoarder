@@ -42,7 +42,6 @@ class FakeObjectStore implements ObjectStore {
       encoding: "gzip",
       logicalBytes: contents.length,
       storedBytes: contents.length,
-      relativePath: `objects/${digest}.gz`,
     };
     this.paths.set(path, object);
     return object;
@@ -62,7 +61,11 @@ class FakeObjectStore implements ObjectStore {
 
   async verify(object: ObjectReference) {
     this.failpoints.hit("object:verify");
-    return { valid: this.available.has(object.digest), digest: object.digest, logicalBytes: object.logicalBytes };
+    return {
+      valid: this.available.has(object.digest),
+      digest: object.digest,
+      logicalBytes: object.logicalBytes,
+    };
   }
 }
 
@@ -122,10 +125,7 @@ class FakeSnapshotter implements SessionSnapshotter {
     return this.boundary;
   }
 
-  async capture(
-    _sourcePath: string,
-    boundary: SourceBoundary,
-  ): Promise<CapturedSessionSnapshot> {
+  async capture(_sourcePath: string, boundary: SourceBoundary): Promise<CapturedSessionSnapshot> {
     this.failpoints.hit("snapshot:capture");
     return {
       path: "snapshot",

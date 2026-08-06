@@ -1,8 +1,4 @@
-import type {
-  ArtifactRelation,
-  SessionArchiveRecord,
-  SessionIdentity,
-} from "../domain/model.js";
+import type { ArtifactRelation, SessionArchiveRecord, SessionIdentity } from "../domain/model.js";
 import { SessionArchive } from "../domain/model.js";
 import type {
   ArtifactDiscovery,
@@ -63,11 +59,7 @@ export class CheckpointApplicationService {
         return { changed: false, record: archive.record! };
       }
 
-      snapshot = await this.dependencies.snapshotter.capture(
-        command.sessionFile,
-        boundary,
-        signal,
-      );
+      snapshot = await this.dependencies.snapshotter.capture(command.sessionFile, boundary, signal);
       const discovered = await this.dependencies.artifactDiscovery.discover(snapshot.path);
       const sessionObject = await putVerified(uow, snapshot.path, signal);
       const artifacts = await captureArtifacts(uow, discovered, signal);

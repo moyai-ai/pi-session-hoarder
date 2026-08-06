@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { access, mkdir, open, rename, stat } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
@@ -68,7 +68,6 @@ export class LocalFileObjectStore implements ObjectStore {
           encoding: "gzip",
           logicalBytes,
           storedBytes: stored.size,
-          relativePath: relative(this.root, destinationPath),
         },
         absolutePath: destinationPath,
       };
@@ -147,4 +146,3 @@ function validateDigest(digest: string): void {
 function isAlreadyExistsError(error: unknown): boolean {
   return hasErrorCode(error, "EEXIST") || hasErrorCode(error, "ENOTEMPTY");
 }
-

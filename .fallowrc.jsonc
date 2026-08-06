@@ -1,10 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
-  "entry": ["src/index.ts"],
+  "entry": ["src/index.ts", "scripts/run-s3-tests.mjs", "vitest.s3.config.ts"],
   "typeAware": {
     "enabled": true,
     "projects": ["tsconfig.json"],
-    "require": "best-effort"
+    "require": "best-effort",
   },
   "boundaries": {
     "zones": [
@@ -14,62 +14,45 @@
       { "name": "entrypoints", "patterns": ["src/entrypoints/**"] },
       {
         "name": "composition",
-        "patterns": ["src/bootstrap.ts", "src/index.ts"]
+        "patterns": ["src/bootstrap.ts", "src/index.ts"],
       },
       { "name": "tests", "patterns": ["test/**"] },
-      { "name": "tooling", "patterns": ["vitest.config.ts"] }
+      {
+        "name": "tooling",
+        "patterns": ["vitest.config.ts", "vitest.s3.config.ts", "scripts/**"],
+      },
     ],
     "rules": [
       { "from": "domain", "allow": ["domain"] },
       {
         "from": "application",
-        "allow": ["domain", "application"]
+        "allow": ["domain", "application"],
       },
       {
         "from": "adapters",
-        "allow": ["domain", "application", "adapters"]
+        "allow": ["domain", "application", "adapters"],
       },
       {
         "from": "entrypoints",
-        "allow": ["domain", "application", "entrypoints"]
+        "allow": ["domain", "application", "entrypoints"],
       },
       {
         "from": "composition",
-        "allow": [
-          "domain",
-          "application",
-          "adapters",
-          "entrypoints",
-          "composition"
-        ]
+        "allow": ["domain", "application", "adapters", "entrypoints", "composition"],
       },
       {
         "from": "tests",
-        "allow": [
-          "domain",
-          "application",
-          "adapters",
-          "entrypoints",
-          "composition",
-          "tests"
-        ]
+        "allow": ["domain", "application", "adapters", "entrypoints", "composition", "tests"],
       },
       {
         "from": "tooling",
-        "allow": [
-          "domain",
-          "application",
-          "adapters",
-          "entrypoints",
-          "composition",
-          "tooling"
-        ]
-      }
+        "allow": ["domain", "application", "adapters", "entrypoints", "composition", "tooling"],
+      },
     ],
     "coverage": {
       "requireAllFiles": true,
-      "allowUnmatched": []
-    }
+      "allowUnmatched": [],
+    },
   },
   "duplicates": {
     "enabled": true,
@@ -77,20 +60,20 @@
     "minTokens": 50,
     "minLines": 5,
     "minOccurrences": 2,
-    "ignoreImports": true
+    "ignoreImports": true,
   },
   "health": {
     "coverage": "coverage/coverage-final.json",
     "maxCyclomatic": 15,
     "maxCognitive": 12,
-    "maxCrap": 25
+    "maxCrap": 25,
   },
   "rules": {
     "private-type-leaks": "warn",
-    "require-suppression-reason": "warn"
+    "require-suppression-reason": "warn",
   },
   "audit": {
     "gate": "new-only",
-    "typeAware": true
-  }
+    "typeAware": true,
+  },
 }

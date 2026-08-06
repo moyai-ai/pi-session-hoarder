@@ -46,10 +46,7 @@ export async function resolveRepositoryIdentity(
   return createRepositoryIdentity("cwd", canonicalCwd);
 }
 
-export function createSessionIdentity(
-  repositoryId: string,
-  sessionId: string,
-): SessionIdentity {
+export function createSessionIdentity(repositoryId: string, sessionId: string): SessionIdentity {
   if (repositoryId.length === 0) throw new Error("repositoryId must not be empty.");
   if (sessionId.length === 0) throw new Error("sessionId must not be empty.");
   return { repositoryId, sessionId };

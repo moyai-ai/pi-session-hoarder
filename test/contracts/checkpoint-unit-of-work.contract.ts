@@ -59,7 +59,6 @@ export function checkpointUnitOfWorkContract(
         encoding: "gzip",
         logicalBytes: 1,
         storedBytes: 1,
-        relativePath: `objects/sha256/aa/${"a".repeat(64)}.gz`,
       };
       uow.archives.add(archiveWithObject(missing));
 

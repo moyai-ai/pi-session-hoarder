@@ -1,4 +1,5 @@
 import type { CheckpointError, CheckpointStatus } from "../domain/model.js";
+import { awaitBounded } from "./bounded-shutdown.js";
 import type { CheckpointSessionResult } from "./checkpoint-service.js";
 
 export interface CheckpointRunner {
@@ -75,13 +76,7 @@ export class CheckpointCoordinator {
     if (this.disposed) return;
     this.dirtyReasons.add(reason);
     this.cancelTimer();
-    const drain = this.drain();
-    let timeoutHandle: unknown;
-    const timeout = new Promise<void>((resolve) => {
-      timeoutHandle = this.scheduler.setTimeout(resolve, this.shutdownTimeoutMs);
-    });
-    await Promise.race([drain.then(() => undefined), timeout]);
-    if (timeoutHandle !== undefined) this.scheduler.clearTimeout(timeoutHandle);
+    await awaitBounded(this.drain(), this.shutdownTimeoutMs, this.scheduler);
     this.dispose();
   }
 

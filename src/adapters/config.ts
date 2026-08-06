@@ -8,15 +8,24 @@ import type {
   ConfigLoadError,
   ConfigLoadOptions,
   ConfigLoadResult,
+  ConfigLoadWarning,
   ConfigPaths,
+  ConfigurationWriter,
   HoarderConfig,
+  S3TargetConfig,
+  ServerSideEncryption,
+  StorageTarget,
 } from "../application/configuration.js";
+import { atomicWriteFile, serializeFileOperation } from "./filesystem/atomic-file.js";
 
 export const DEFAULT_CONFIG = Object.freeze({
   enabled: true,
   debounceMs: 30_000,
   shutdownTimeoutMs: 3_000,
+  retrievalConfirmationBytes: 100 * 1024 * 1024,
   storageRoot: "~/.pi/agent/session-hoarder",
+  storageTarget: "local",
+  gitCatalogEnabled: false,
 } satisfies HoarderConfig);
 
 export interface ConfigDependencies {
@@ -26,21 +35,42 @@ export interface ConfigDependencies {
   homeDir: string;
 }
 
+export interface ConfigWriterDependencies {
+  readTextFile(path: string): Promise<string>;
+  atomicWrite(path: string, data: string): Promise<void>;
+  agentDir: string;
+  configDirName: string;
+}
+
 type ConfigKey = keyof HoarderConfig;
 type ConfigPatch = Partial<HoarderConfig>;
 type ConfigScope = "global" | "project";
 
 const CONFIG_FILE_NAME = "session-hoarder.json";
-const CONFIG_KEYS = new Set<ConfigKey>([
+const ALL_CONFIG_KEYS = new Set<ConfigKey>([
   "enabled",
   "debounceMs",
   "shutdownTimeoutMs",
+  "retrievalConfirmationBytes",
   "storageRoot",
+  "storageTarget",
+  "s3",
+  "gitCatalogEnabled",
+]);
+const GLOBAL_CONFIG_KEYS = new Set<ConfigKey>([
+  "enabled",
+  "debounceMs",
+  "shutdownTimeoutMs",
+  "retrievalConfirmationBytes",
+  "storageRoot",
+  "storageTarget",
+  "s3",
 ]);
 const PROJECT_CONFIG_KEYS = new Set<ConfigKey>([
   "enabled",
   "debounceMs",
   "shutdownTimeoutMs",
+  "gitCatalogEnabled",
 ]);
 
 const defaultDependencies: ConfigDependencies = {
@@ -50,15 +80,19 @@ const defaultDependencies: ConfigDependencies = {
   homeDir: homedir(),
 };
 
+const defaultWriterDependencies: ConfigWriterDependencies = {
+  readTextFile: (path) => readFile(path, "utf8"),
+  atomicWrite: atomicWriteFile,
+  agentDir: getAgentDir(),
+  configDirName: CONFIG_DIR_NAME,
+};
+
 export async function loadConfig(
   options: ConfigLoadOptions,
   dependencyOverrides: Partial<ConfigDependencies> = {},
 ): Promise<ConfigLoadResult> {
   const dependencies = { ...defaultDependencies, ...dependencyOverrides };
-  const paths = {
-    global: join(dependencies.agentDir, CONFIG_FILE_NAME),
-    project: join(options.cwd, dependencies.configDirName, CONFIG_FILE_NAME),
-  };
+  const paths = configPaths(options.cwd, dependencies.agentDir, dependencies.configDirName);
   const loadedFrom: string[] = [];
 
   const defaultConfig = resolveConfigPaths(DEFAULT_CONFIG, paths.global, dependencies.homeDir);
@@ -79,7 +113,7 @@ export async function loadConfig(
   }
 
   if (!options.isProjectTrusted) {
-    return { ok: true, config, paths, loadedFrom };
+    return successResult(config, paths, loadedFrom, globalResult.warning);
   }
 
   const projectResult = await readConfigFile(
@@ -96,7 +130,40 @@ export async function loadConfig(
     loadedFrom.push(paths.project);
   }
 
-  return { ok: true, config, paths, loadedFrom };
+  return successResult(config, paths, loadedFrom, globalResult.warning);
+}
+
+export function createConfigurationWriter(
+  dependencyOverrides: Partial<ConfigWriterDependencies> = {},
+): ConfigurationWriter {
+  const dependencies = { ...defaultWriterDependencies, ...dependencyOverrides };
+  return {
+    selectStorageTarget: async (target) => {
+      const path = join(dependencies.agentDir, CONFIG_FILE_NAME);
+      await mutateConfigFile(path, dependencies, (config) => ({
+        ...config,
+        storageTarget: target,
+      }));
+    },
+    enableGitCatalog: async (cwd) => {
+      const path = join(cwd, dependencies.configDirName, CONFIG_FILE_NAME);
+      await mutateConfigFile(path, dependencies, (config) => ({
+        ...config,
+        gitCatalogEnabled: true,
+      }));
+    },
+  };
+}
+
+function successResult(
+  config: HoarderConfig,
+  paths: ConfigPaths,
+  loadedFrom: readonly string[],
+  warning?: ConfigLoadWarning,
+): ConfigLoadResult {
+  return warning
+    ? { ok: true, config, paths, loadedFrom, warning }
+    : { ok: true, config, paths, loadedFrom };
 }
 
 function failureResult(
@@ -119,14 +186,15 @@ async function readConfigFile(
   scope: ConfigScope,
   readTextFile: ConfigDependencies["readTextFile"],
   homeDir: string,
-): Promise<{ ok: true; patch?: ConfigPatch } | { ok: false; error: ConfigLoadError }> {
+): Promise<
+  | { ok: true; patch?: ConfigPatch; warning?: ConfigLoadWarning }
+  | { ok: false; error: ConfigLoadError }
+> {
   let text: string;
   try {
     text = await readTextFile(path);
   } catch (error) {
-    if (isMissingFileError(error)) {
-      return { ok: true };
-    }
+    if (isMissingFileError(error)) return { ok: true };
     return {
       ok: false,
       error: {
@@ -152,7 +220,12 @@ async function readConfigFile(
   }
 
   try {
-    return { ok: true, patch: validateConfig(value, scope, path, homeDir) };
+    const validated = validateConfig(value, scope, path, homeDir);
+    return {
+      ok: true,
+      patch: validated.patch,
+      ...(validated.warning ? { warning: validated.warning } : {}),
+    };
   } catch (error) {
     return {
       ok: false,
@@ -170,18 +243,61 @@ function validateConfig(
   scope: ConfigScope,
   configPath: string,
   homeDir: string,
-): ConfigPatch {
+): { patch: ConfigPatch; warning?: ConfigLoadWarning } {
   const config = requireConfigObject(value, scope, configPath);
   validateConfigKeys(config, scope, configPath);
 
+  const patch = captureSettings(config, scope, configPath, homeDir);
+  if (scope === "project") {
+    const gitCatalogEnabled = optionalBoolean(config, "gitCatalogEnabled", scope);
+    if (gitCatalogEnabled !== undefined) patch.gitCatalogEnabled = gitCatalogEnabled;
+    return { patch };
+  }
+
+  try {
+    const storageTarget = optionalStorageTarget(config);
+    const s3 = optionalS3Target(config);
+    if (storageTarget === "s3" && !s3) {
+      throw new Error(
+        'Global Session Hoarder config "storageTarget" cannot be "s3" without a valid "s3" target.',
+      );
+    }
+    if (storageTarget !== undefined) patch.storageTarget = storageTarget;
+    if (s3) patch.s3 = s3;
+    return { patch };
+  } catch (error) {
+    return {
+      patch: { ...patch, storageTarget: "local" },
+      warning: {
+        kind: "remote-validation",
+        path: configPath,
+        message: `${errorMessage(error)} Remote storage is disabled; local collection remains enabled.`,
+      },
+    };
+  }
+}
+
+function captureSettings(
+  config: Record<string, unknown>,
+  scope: ConfigScope,
+  configPath: string,
+  homeDir: string,
+): ConfigPatch {
   const patch: ConfigPatch = {};
   const enabled = optionalBoolean(config, "enabled", scope);
   const debounceMs = optionalMilliseconds(config, "debounceMs", scope);
   const shutdownTimeoutMs = optionalMilliseconds(config, "shutdownTimeoutMs", scope);
+  const retrievalConfirmationBytes = optionalMilliseconds(
+    config,
+    "retrievalConfirmationBytes",
+    scope,
+  );
   const storageRoot = optionalStorageRoot(config, scope, configPath, homeDir);
   if (enabled !== undefined) patch.enabled = enabled;
   if (debounceMs !== undefined) patch.debounceMs = debounceMs;
   if (shutdownTimeoutMs !== undefined) patch.shutdownTimeoutMs = shutdownTimeoutMs;
+  if (retrievalConfirmationBytes !== undefined)
+    patch.retrievalConfirmationBytes = retrievalConfirmationBytes;
   if (storageRoot !== undefined) patch.storageRoot = storageRoot;
   return patch;
 }
@@ -200,14 +316,16 @@ function validateConfigKeys(
   scope: ConfigScope,
   configPath: string,
 ): void {
-  const allowedKeys = scope === "global" ? CONFIG_KEYS : PROJECT_CONFIG_KEYS;
+  const allowedKeys = scope === "global" ? GLOBAL_CONFIG_KEYS : PROJECT_CONFIG_KEYS;
   for (const key of Object.keys(config)) {
-    if (!CONFIG_KEYS.has(key as ConfigKey)) {
-      throw new Error(`${scopeLabel(scope)} config at ${configPath} contains unknown key "${key}".`);
+    if (!ALL_CONFIG_KEYS.has(key as ConfigKey)) {
+      throw new Error(
+        `${scopeLabel(scope)} config at ${configPath} contains unknown key "${key}".`,
+      );
     }
     if (!allowedKeys.has(key as ConfigKey)) {
       throw new Error(
-        `${scopeLabel(scope)} config at ${configPath} cannot set "${key}"; configure it globally instead.`,
+        `${scopeLabel(scope)} config at ${configPath} cannot set "${key}"; configure it ${scope === "global" ? "per trusted project" : "globally"} instead.`,
       );
     }
   }
@@ -215,7 +333,7 @@ function validateConfigKeys(
 
 function optionalBoolean(
   config: Record<string, unknown>,
-  key: "enabled",
+  key: "enabled" | "gitCatalogEnabled",
   scope: ConfigScope,
 ): boolean | undefined {
   if (!(key in config)) return undefined;
@@ -227,7 +345,7 @@ function optionalBoolean(
 
 function optionalMilliseconds(
   config: Record<string, unknown>,
-  key: "debounceMs" | "shutdownTimeoutMs",
+  key: "debounceMs" | "shutdownTimeoutMs" | "retrievalConfirmationBytes",
   scope: ConfigScope,
 ): number | undefined {
   if (!(key in config)) return undefined;
@@ -251,6 +369,115 @@ function optionalStorageRoot(
   return expandStorageRoot(value, configPath, homeDir);
 }
 
+function optionalStorageTarget(config: Record<string, unknown>): StorageTarget | undefined {
+  if (!("storageTarget" in config)) return undefined;
+  if (config.storageTarget !== "local" && config.storageTarget !== "s3") {
+    throw new Error('Global Session Hoarder config "storageTarget" must be "local" or "s3".');
+  }
+  return config.storageTarget;
+}
+
+function optionalS3Target(config: Record<string, unknown>): S3TargetConfig | undefined {
+  if (!("s3" in config)) return undefined;
+  if (!isPlainObject(config.s3)) {
+    throw new Error('Global Session Hoarder config "s3" must be a JSON object.');
+  }
+  const s3 = config.s3;
+  validateS3Keys(s3);
+  const targetId = requiredString(s3, "targetId");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(targetId)) {
+    throw new Error(
+      'Global Session Hoarder config "s3.targetId" must be a filesystem-safe name of at most 64 characters.',
+    );
+  }
+  const endpoint = optionalEndpoint(s3);
+  const serverSideEncryption = optionalEncryption(s3);
+  return {
+    targetId,
+    bucket: requiredString(s3, "bucket"),
+    region: requiredString(s3, "region"),
+    prefix: normalizePrefix(optionalString(s3, "prefix") ?? "session-hoarder"),
+    forcePathStyle: optionalBooleanField(s3, "forcePathStyle") ?? false,
+    ...(endpoint ? { endpoint } : {}),
+    ...(optionalString(s3, "profile") ? { profile: optionalString(s3, "profile") } : {}),
+    ...(serverSideEncryption ? { serverSideEncryption } : {}),
+    ...(optionalString(s3, "kmsKeyId") ? { kmsKeyId: optionalString(s3, "kmsKeyId") } : {}),
+  };
+}
+
+function validateS3Keys(config: Record<string, unknown>): void {
+  const allowed = new Set([
+    "targetId",
+    "bucket",
+    "region",
+    "prefix",
+    "endpoint",
+    "profile",
+    "forcePathStyle",
+    "serverSideEncryption",
+    "kmsKeyId",
+  ]);
+  for (const key of Object.keys(config)) {
+    if (!allowed.has(key))
+      throw new Error(`Global Session Hoarder config contains unknown key "s3.${key}".`);
+  }
+}
+
+function requiredString(config: Record<string, unknown>, key: string): string {
+  const value = config[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`Global Session Hoarder config "s3.${key}" must be a non-empty string.`);
+  }
+  return value.trim();
+}
+
+function optionalString(config: Record<string, unknown>, key: string): string | undefined {
+  if (!(key in config)) return undefined;
+  const value = config[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`Global Session Hoarder config "s3.${key}" must be a non-empty string.`);
+  }
+  return value.trim();
+}
+
+function optionalBooleanField(config: Record<string, unknown>, key: string): boolean | undefined {
+  if (!(key in config)) return undefined;
+  if (typeof config[key] !== "boolean") {
+    throw new Error(`Global Session Hoarder config "s3.${key}" must be a boolean.`);
+  }
+  return config[key];
+}
+
+function optionalEndpoint(config: Record<string, unknown>): string | undefined {
+  const value = optionalString(config, "endpoint");
+  if (!value) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('Global Session Hoarder config "s3.endpoint" must be an absolute HTTP(S) URL.');
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error('Global Session Hoarder config "s3.endpoint" must be an absolute HTTP(S) URL.');
+  }
+  return url.toString().replace(/\/$/, "");
+}
+
+function optionalEncryption(config: Record<string, unknown>): ServerSideEncryption | undefined {
+  if (!("serverSideEncryption" in config)) return undefined;
+  const value = config.serverSideEncryption;
+  if (value !== "AES256" && value !== "aws:kms") {
+    throw new Error(
+      'Global Session Hoarder config "s3.serverSideEncryption" must be "AES256" or "aws:kms".',
+    );
+  }
+  return value;
+}
+
+function normalizePrefix(value: string): string {
+  return value.replace(/^\/+|\/+$/g, "");
+}
+
 function validateMilliseconds(value: unknown, key: string, scope: ConfigScope): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${scopeLabel(scope)} config "${key}" must be a non-negative safe integer.`);
@@ -270,19 +497,48 @@ function resolveConfigPaths(
 }
 
 function expandStorageRoot(value: string, configPath: string, homeDir: string): string {
-  if (value === "~") {
-    return normalize(homeDir);
-  }
-  if (value.startsWith("~/")) {
-    return normalize(join(homeDir, value.slice(2)));
-  }
+  if (value === "~") return normalize(homeDir);
+  if (value.startsWith("~/")) return normalize(join(homeDir, value.slice(2)));
   if (value.startsWith("~")) {
     throw new Error(`Config "storageRoot" does not support named-home expansion: "${value}".`);
   }
-  if (isAbsolute(value)) {
-    return normalize(value);
-  }
+  if (isAbsolute(value)) return normalize(value);
   return resolve(dirname(configPath), value);
+}
+
+async function mutateConfigFile(
+  path: string,
+  dependencies: ConfigWriterDependencies,
+  mutate: (config: Record<string, unknown>) => Record<string, unknown>,
+): Promise<void> {
+  await serializeFileOperation(path, async () => {
+    let config: Record<string, unknown> = {};
+    try {
+      const text = await dependencies.readTextFile(path);
+      const value: unknown = JSON.parse(text);
+      if (!isPlainObject(value)) {
+        throw new Error(`Session Hoarder config at ${path} must be a JSON object.`);
+      }
+      config = value;
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        throw new Error(
+          `Unable to update Session Hoarder config at ${path}: ${errorMessage(error)}`,
+          {
+            cause: error,
+          },
+        );
+      }
+    }
+    await dependencies.atomicWrite(path, `${JSON.stringify(mutate(config), null, 2)}\n`);
+  });
+}
+
+function configPaths(cwd: string, agentDir: string, configDirName: string): ConfigPaths {
+  return {
+    global: join(agentDir, CONFIG_FILE_NAME),
+    project: join(cwd, configDirName, CONFIG_FILE_NAME),
+  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -15,13 +15,12 @@ function object(hash = digest): ObjectReference {
     encoding: "gzip",
     logicalBytes: 10,
     storedBytes: 8,
-    relativePath: `objects/${hash}.gz`,
   };
 }
 
 function record(): SessionArchiveRecord {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     repositoryId: "repo",
     sessionId: "session",
     revision: 1,

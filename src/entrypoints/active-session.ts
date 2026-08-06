@@ -1,5 +1,13 @@
 import type { CheckpointCoordinator } from "../application/checkpoint-coordinator.js";
+import type {
+  ReplicationCoordinator,
+  ReplicationStatus,
+} from "../application/replication-coordinator.js";
 import type { ConfigLoadResult, HoarderConfig } from "../application/configuration.js";
+import type {
+  ProjectCatalogApplicationService,
+  PublishProjectCatalogResult,
+} from "../application/project-catalog.js";
 import { formatFooterStatus, type HoarderStatusSnapshot } from "../application/status.js";
 import type {
   CheckpointStatus,
@@ -37,7 +45,13 @@ export class ActiveSession {
   checkpoint: CheckpointStatus = { state: "pending", dirtyReasons: ["initializing"] };
   record?: SessionArchiveRecord;
   initializationError?: string;
+  configurationWarning?: string;
   coordinator?: CheckpointCoordinator;
+  replicationCoordinator?: ReplicationCoordinator;
+  replication: ReplicationStatus = { state: "off" };
+  projectCatalogService?: ProjectCatalogApplicationService;
+  projectCatalog?: PublishProjectCatalogResult;
+  projectCatalogError?: string;
 
   private readonly host: ActiveSessionHost;
   private readonly scheduler: UiScheduler;
@@ -81,6 +95,9 @@ export class ActiveSession {
       checkpoint: this.checkpoint,
       record: this.record,
       initializationError: this.initializationError,
+      configurationWarning: this.configurationWarning,
+      publishedRevision: publishedRevision(this.replication),
+      remoteState: remoteState(this.replication),
     });
   }
 
@@ -152,6 +169,25 @@ export class ActiveSession {
   private renderStatus(): void {
     const frame = SPINNER_FRAMES[this.spinnerFrame] ?? SPINNER_FRAMES[0];
     this.host.renderStatus(formatFooterStatus(this.snapshot(), frame));
+  }
+}
+
+function publishedRevision(status: ReplicationStatus): number | undefined {
+  return "publishedRevision" in status ? status.publishedRevision : undefined;
+}
+
+function remoteState(status: ReplicationStatus): string {
+  switch (status.state) {
+    case "off":
+      return "off";
+    case "idle":
+      return status.publishedRevision ? "synchronized" : "not synchronized";
+    case "pending":
+      return "pending";
+    case "running":
+      return "synchronizing";
+    case "error":
+      return "retry pending";
   }
 }
 

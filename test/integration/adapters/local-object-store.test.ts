@@ -14,7 +14,9 @@ import { objectStoreContract } from "../../contracts/object-store.contract.js";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 
 async function fixture(): Promise<{
@@ -78,7 +80,9 @@ describe("LocalFileObjectStore", () => {
 
     expect(second.object).toEqual(first.object);
     expect(await readdir(cas.objectsRoot)).toEqual([`${first.object.digest}.gz`]);
-    expect(first.object.relativePath).toBe(`objects/sha256/${first.object.digest}.gz`);
+    expect(cas.objectPath(first.object.digest)).toBe(
+      join(cas.objectsRoot, `${first.object.digest}.gz`),
+    );
   });
 
   it("converges concurrent writes of the same input", async () => {
@@ -97,7 +101,9 @@ describe("LocalFileObjectStore", () => {
     const controller = new AbortController();
     controller.abort();
 
-    await expect(cas.putFile(source, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    await expect(cas.putFile(source, controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
     await mkdir(cas.temporaryRoot, { recursive: true });
     expect(await readdir(cas.temporaryRoot)).toEqual([]);
   });

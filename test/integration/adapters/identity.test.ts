@@ -17,9 +17,18 @@ function dependencies(
 describe("normalizeGitRemote", () => {
   it.each([
     ["git@github.com:moyai-ai/pi-session-hoarder.git", "github.com/moyai-ai/pi-session-hoarder"],
-    ["ssh://git@github.com/moyai-ai/pi-session-hoarder.git", "github.com/moyai-ai/pi-session-hoarder"],
-    ["https://github.com/moyai-ai/pi-session-hoarder.git", "github.com/moyai-ai/pi-session-hoarder"],
-    ["https://user:token@GitHub.com/moyai-ai/pi-session-hoarder/", "github.com/moyai-ai/pi-session-hoarder"],
+    [
+      "ssh://git@github.com/moyai-ai/pi-session-hoarder.git",
+      "github.com/moyai-ai/pi-session-hoarder",
+    ],
+    [
+      "https://github.com/moyai-ai/pi-session-hoarder.git",
+      "github.com/moyai-ai/pi-session-hoarder",
+    ],
+    [
+      "https://user:token@GitHub.com/moyai-ai/pi-session-hoarder/",
+      "github.com/moyai-ai/pi-session-hoarder",
+    ],
   ])("normalizes %s", (remote, expected) => {
     expect(normalizeGitRemote(remote)).toBe(expected);
   });
@@ -34,7 +43,9 @@ describe("resolveRepositoryIdentity", () => {
 
     const identity = await resolveRepositoryIdentity(
       "/work/repo/subdir",
-      dependencies(git, async (path) => path.replace("/work/repo/subdir", "/canonical/repo/subdir")),
+      dependencies(git, async (path) =>
+        path.replace("/work/repo/subdir", "/canonical/repo/subdir"),
+      ),
     );
 
     expect(identity).toMatchObject({
