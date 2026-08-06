@@ -35,6 +35,7 @@ import { SerializedMaintenanceExclusion } from "../../src/application/maintenanc
 import { ReplicationCoordinator } from "../../src/application/replication-coordinator.js";
 import {
   createLocalCheckpointApplication,
+  createLocalStatusQuery,
   createPruneApplication,
   fingerprintDraftTarget,
 } from "../../src/bootstrap.js";
@@ -154,6 +155,7 @@ describe("MinIO S3 compatibility", () => {
         repositoryId: "setup-repository",
       }),
       createCheckpointService: (root) => createLocalCheckpointApplication(root).service,
+      createStatusQuery: createLocalStatusQuery,
       createCoordinator: (options) => new CheckpointCoordinator(options),
       createReplicationService: (root, target) =>
         createObservedReplicationApplication(root, target, () => {

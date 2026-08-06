@@ -9,6 +9,7 @@ import type {
   PublishProjectCatalogResult,
 } from "../application/project-catalog.js";
 import { formatFooterStatus, type HoarderStatusSnapshot } from "../application/status.js";
+import type { HoarderDurableStatus, HoarderStatusQuery } from "../application/status-query.js";
 import type {
   CheckpointStatus,
   RepositoryIdentity,
@@ -47,6 +48,8 @@ export class ActiveSession {
   record?: SessionArchiveRecord;
   initializationError?: string;
   configurationWarning?: string;
+  durable?: HoarderDurableStatus;
+  statusQuery?: HoarderStatusQuery;
   coordinator?: CheckpointCoordinator;
   replicationCoordinator?: ReplicationCoordinator;
   replication: ReplicationStatus = { state: "off" };
@@ -59,6 +62,7 @@ export class ActiveSession {
   private readonly isCurrent: () => boolean;
   private spinnerHandle?: unknown;
   private spinnerFrame = 0;
+  private statusRefreshSequence = 0;
 
   constructor(
     host: ActiveSessionHost,
@@ -98,9 +102,24 @@ export class ActiveSession {
       record: this.record,
       initializationError: this.initializationError,
       configurationWarning: this.configurationWarning,
-      publishedRevision: publishedRevision(this.replication),
-      remoteState: remoteState(this.replication),
+      durable: this.durable,
+      publishedRevision: this.durable?.publishedRevision,
+      remoteState: remoteState(this.replication, this.durable),
     });
+  }
+
+  beginStatusRefresh(): number {
+    this.statusRefreshSequence += 1;
+    return this.statusRefreshSequence;
+  }
+
+  applyDurableStatus(sequence: number, durable: HoarderDurableStatus): boolean {
+    if (sequence !== this.statusRefreshSequence) return false;
+    this.durable = durable;
+    if (durable.archive && durable.archive.revision >= (this.record?.revision ?? 0)) {
+      this.record = durable.archive;
+    }
+    return true;
   }
 
   failConfiguration(result: Extract<ConfigLoadResult, { ok: false }>): void {
@@ -174,16 +193,17 @@ export class ActiveSession {
   }
 }
 
-function publishedRevision(status: ReplicationStatus): number | undefined {
-  return "publishedRevision" in status ? status.publishedRevision : undefined;
-}
-
-function remoteState(status: ReplicationStatus): string {
+function remoteState(status: ReplicationStatus, durable?: HoarderDurableStatus): string {
+  if (durable?.target === "local") return "off";
+  if (durable?.target === "s3:unconfigured") return "configuration required";
   switch (status.state) {
     case "off":
       return "off";
     case "idle":
-      return status.publishedRevision ? "synchronized" : "not synchronized";
+      return durable?.publishedRevision !== undefined &&
+        durable.publishedRevision === durable.localRevision
+        ? "synchronized"
+        : "not synchronized";
     case "pending":
       return "pending";
     case "running":

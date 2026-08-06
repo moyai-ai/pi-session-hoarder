@@ -64,10 +64,10 @@ describe("status formatting", () => {
 
     expect(text).toContain(
       [
-        "Local revision:      00015",
-        "Published revision:  00014",
-        "Target:              s3:backup",
-        "Remote:              retry pending",
+        "Local revision:       00015",
+        "Published revision:   00014",
+        "Target:               s3:backup",
+        "Remote:               retry pending",
       ].join("\n"),
     );
   });
@@ -102,7 +102,7 @@ describe("status formatting", () => {
       },
     });
 
-    expect(text).toContain("Local revision:      100000");
+    expect(text).toContain("Local revision:       100000");
   });
 
   it("keeps error detail available on demand", () => {
@@ -114,7 +114,7 @@ describe("status formatting", () => {
       },
     });
 
-    expect(text).toContain("Hoarder:             error");
-    expect(text).toContain("Last error:          disk full");
+    expect(text).toContain("Hoarder:              error");
+    expect(text).toContain("Last error:           disk full");
   });
 });

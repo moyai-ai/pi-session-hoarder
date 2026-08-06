@@ -15,8 +15,14 @@ import { SerializedMaintenanceExclusion } from "../../src/application/maintenanc
 import type { ReplicationApplicationService } from "../../src/application/replication-service.js";
 import { createS3TargetDraftValidator } from "../../src/adapters/config.js";
 import { LocalFileObjectStore } from "../../src/adapters/filesystem/local-object-store.js";
+import { LocalSessionArchiveRepository } from "../../src/adapters/filesystem/local-session-archive-repository.js";
 import { LocalSessionReplicaRepository } from "../../src/adapters/filesystem/local-session-replica-repository.js";
-import { createLocalCheckpointApplication, createPruneApplication } from "../../src/bootstrap.js";
+import {
+  createLocalCheckpointApplication,
+  createLocalStatusQuery,
+  createPruneApplication,
+} from "../../src/bootstrap.js";
+import { uniqueObjects } from "../../src/application/status-query.js";
 import { SessionReplica } from "../../src/domain/replica.js";
 import {
   HoarderLifecycle,
@@ -143,6 +149,7 @@ async function fixture(
       repositoryId: "repo-id",
     }),
     createCheckpointService: (root) => createLocalCheckpointApplication(root).service,
+    createStatusQuery: createLocalStatusQuery,
     createCoordinator: (options) => new CheckpointCoordinator(options),
     createReplicationService: vi.fn(
       () =>
@@ -1215,6 +1222,112 @@ describe("HoarderLifecycle", () => {
     expect(remoteSync).toHaveBeenCalled();
   });
 
+  it("rebuilds published status from durable replica state before startup recovery runs", async () => {
+    const { directory, storageRoot, config, dependencies } = await fixture(true, "s3");
+    config.config.debounceMs = 60_000;
+    const scheduler = new ManualReplicationScheduler();
+    const remoteSync = vi.fn(async () => undefined);
+    dependencies.createReplicationService = vi.fn(
+      () => ({ sync: remoteSync }) as unknown as ReplicationApplicationService,
+    );
+    dependencies.createReplicationCoordinator = (options) =>
+      new ReplicationCoordinator({ ...options, scheduler });
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const checkpoint = await createLocalCheckpointApplication(storageRoot).service.checkpoint({
+      repositoryId: "repo-id",
+      sessionId: "session",
+      sessionFile,
+    });
+    if (!checkpoint) throw new Error("expected committed checkpoint");
+    const replica = SessionReplica.create({
+      targetId: "backup",
+      repositoryId: "repo-id",
+      sessionId: "session",
+    });
+    replica.recordVerifiedRevision({
+      revision: checkpoint.record.revision,
+      objects: uniqueObjects(checkpoint.record).map((object) => ({
+        object,
+        key: `session-hoarder/objects/sha256/${object.digest}.gz`,
+      })),
+      verifiedAt: "2026-08-06T12:00:00.000Z",
+    });
+    await new LocalSessionReplicaRepository(storageRoot).persist(replica);
+
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+    await invoke(handlers.get("session_start"), { reason: "reload" }, context);
+
+    expect(lifecycle.getStatusSnapshot()).toMatchObject({
+      record: { revision: 1 },
+      durable: {
+        localRevision: 1,
+        publishedRevision: 1,
+        referencedObjects: 1,
+        localObjects: 1,
+        remoteVerifiedObjects: 1,
+      },
+      publishedRevision: 1,
+    });
+    expect(remoteSync).not.toHaveBeenCalled();
+  });
+
+  it("refreshes remote-only status after pruning a current-revision object", async () => {
+    const { directory, storageRoot, config, dependencies } = await fixture(true, "s3");
+    config.config.debounceMs = 60_000;
+    const scheduler = new ManualReplicationScheduler();
+    dependencies.createReplicationCoordinator = (options) =>
+      new ReplicationCoordinator({ ...options, scheduler });
+    dependencies.createPruneService = createPruneApplication;
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const checkpoint = await createLocalCheckpointApplication(storageRoot).service.checkpoint({
+      repositoryId: "repo-id",
+      sessionId: "session",
+      sessionFile,
+    });
+    if (!checkpoint) throw new Error("expected committed checkpoint");
+    const replica = SessionReplica.create({
+      targetId: "backup",
+      repositoryId: "repo-id",
+      sessionId: "session",
+    });
+    replica.recordVerifiedRevision({
+      revision: checkpoint.record.revision,
+      objects: uniqueObjects(checkpoint.record).map((object) => ({
+        object,
+        key: `session-hoarder/objects/sha256/${object.digest}.gz`,
+      })),
+      verifiedAt: "2026-08-06T12:00:00.000Z",
+    });
+    await new LocalSessionReplicaRepository(storageRoot).persist(replica);
+
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+    await invoke(handlers.get("session_start"), { reason: "reload" }, context);
+
+    await expect(lifecycle.prune({ confirm: async () => true }, "session")).resolves.toMatchObject({
+      removedObjects: 1,
+    });
+    expect(lifecycle.getStatusSnapshot().durable).toMatchObject({
+      localObjects: 0,
+      remoteVerifiedObjects: 1,
+      remoteOnlyObjects: 1,
+      remoteOnlyStoredBytes: checkpoint.record.sessionObject.storedBytes,
+    });
+  });
+
   it("retries an unpublished unchanged local revision after restart", async () => {
     const { directory, config, dependencies } = await fixture(true, "local", true);
     const sessionFile = join(directory, "session.jsonl");
@@ -1251,30 +1364,33 @@ describe("HoarderLifecycle", () => {
   });
 
   it("publishes the latest local revision on manual S3 sync", async () => {
-    const { directory, dependencies } = await fixture(true, "s3");
-    const remoteSync = vi.fn(async () => ({
-      changed: true,
-      record: {
-        schemaVersion: 1 as const,
+    const { directory, storageRoot, config, dependencies } = await fixture(true, "s3");
+    config.config.debounceMs = 60_000;
+    const scheduler = new ManualReplicationScheduler();
+    dependencies.createReplicationCoordinator = (options) =>
+      new ReplicationCoordinator({ ...options, scheduler });
+    const remoteSync = vi.fn(async () => {
+      const archive = await new LocalSessionArchiveRepository(storageRoot).get({
+        repositoryId: "repo-id",
+        sessionId: "session",
+      });
+      if (!archive?.record) throw new Error("expected committed archive");
+      const replica = SessionReplica.create({
         targetId: "backup",
         repositoryId: "repo-id",
         sessionId: "session",
-        revision: 1,
-        objects: [
-          {
-            object: {
-              algorithm: "sha256" as const,
-              digest: "a".repeat(64),
-              encoding: "gzip" as const,
-              logicalBytes: 1,
-              storedBytes: 1,
-            },
-            key: "session-hoarder/objects/sha256/object.gz",
-          },
-        ],
-        verifiedAt: "2026-08-05T12:00:00.000Z",
-      },
-    }));
+      });
+      const record = replica.recordVerifiedRevision({
+        revision: archive.record.revision,
+        objects: uniqueObjects(archive.record).map((object) => ({
+          object,
+          key: `session-hoarder/objects/sha256/${object.digest}.gz`,
+        })),
+        verifiedAt: "2026-08-06T12:00:00.000Z",
+      });
+      await new LocalSessionReplicaRepository(storageRoot).persist(replica);
+      return { changed: true, record };
+    });
     dependencies.createReplicationService = vi.fn(
       () =>
         ({

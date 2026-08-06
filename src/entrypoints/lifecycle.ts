@@ -36,6 +36,7 @@ import {
   type S3TargetDraftValidator,
 } from "../application/s3-setup.js";
 import type { HoarderStatusSnapshot } from "../application/status.js";
+import { uniqueObjects, type HoarderStatusQuery } from "../application/status-query.js";
 import type { MaintenanceExclusion } from "../application/maintenance-exclusion.js";
 import type { PruneConfirmation } from "../application/prune-ports.js";
 import type { PruneApplicationService, PruneResult } from "../application/prune-service.js";
@@ -44,7 +45,7 @@ import type {
   ProjectCatalogApplicationService,
   PublishProjectCatalogResult,
 } from "../application/project-catalog.js";
-import type { RepositoryIdentity, SessionArchiveRecord } from "../domain/model.js";
+import type { RepositoryIdentity } from "../domain/model.js";
 import { ActiveSession, type ActiveSessionHost, type UiScheduler } from "./active-session.js";
 
 export type { UiScheduler } from "./active-session.js";
@@ -81,6 +82,7 @@ export interface LifecycleDependencies {
   loadConfiguration(options: { cwd: string; isProjectTrusted: boolean }): Promise<ConfigLoadResult>;
   resolveRepository(cwd: string): Promise<RepositoryIdentity>;
   createCheckpointService(storageRoot: string): CheckpointApplicationService;
+  createStatusQuery(storageRoot: string): HoarderStatusQuery;
   createCoordinator(options: CheckpointCoordinatorOptions): CheckpointCoordinator;
   createReplicationService(
     storageRoot: string,
@@ -181,12 +183,25 @@ export class HoarderLifecycle implements HoarderController {
 
   async selectStorageTarget(target: StorageTarget, expectedSessionId?: string): Promise<string> {
     const runtime = this.requireCurrentRuntime(expectedSessionId, "storage selection");
+    this.assertStorageTargetAvailable(runtime, target);
+    if (target === "local") this.cancelReplication(runtime);
+    await this.persistStorageTarget(runtime, target);
+    this.assertStorageSelectionCurrent(runtime);
+    runtime.config = { ...runtime.config!, storageTarget: target };
+    await this.refreshDurableStatus(runtime);
+    this.assertStorageSelectionCurrent(runtime);
+    this.activateSelectedStorage(runtime, target);
+    return selectedTargetLabel(runtime, target);
+  }
+
+  private assertStorageTargetAvailable(runtime: ActiveSession, target: StorageTarget): void {
     if (!runtime.config) throw new Error("Session Hoarder configuration is unavailable.");
     if (target === "s3" && !runtime.config.s3) {
       throw new Error("No S3 target is configured in the global Session Hoarder config.");
     }
+  }
 
-    if (target === "local") this.cancelReplication(runtime);
+  private async persistStorageTarget(runtime: ActiveSession, target: StorageTarget): Promise<void> {
     try {
       await this.dependencies.configurationWriter.selectStorageTarget(target);
     } catch (error) {
@@ -196,15 +211,18 @@ export class HoarderLifecycle implements HoarderController {
       }
       throw error;
     }
+  }
 
+  private assertStorageSelectionCurrent(runtime: ActiveSession): void {
     if (!this.isRuntimeCurrent(runtime)) {
       throw new Error("The active Pi session changed before storage selection could complete.");
     }
-    runtime.config = { ...runtime.config, storageTarget: target };
+  }
+
+  private activateSelectedStorage(runtime: ActiveSession, target: StorageTarget): void {
     if (target === "s3") this.configureReplication(runtime);
     else runtime.replication = { state: "off" };
     runtime.updateUi();
-    return target === "s3" ? `s3:${runtime.config.s3!.targetId}` : "local";
   }
 
   getS3SetupInitial(expectedSessionId?: string): S3SetupInitial {
@@ -232,7 +250,7 @@ export class HoarderLifecycle implements HoarderController {
     }
     if (!runtime.record)
       throw new Error("No committed local checkpoint is available for S3 setup.");
-    const objects = uniqueArchiveObjects(runtime.record);
+    const objects = uniqueObjects(runtime.record);
     return {
       target: structuredClone(target),
       objectCount: objects.length,
@@ -265,7 +283,7 @@ export class HoarderLifecycle implements HoarderController {
     this.assertSetupRuntimeCurrent(runtime, "saved");
     await this.dependencies.configurationWriter.configureAndSelectS3(target);
     this.assertSetupRuntimeCurrent(runtime, "activated");
-    this.activateS3Target(runtime, target);
+    await this.activateS3Target(runtime, target);
     return { target: `s3:${target.targetId}`, verified };
   }
 
@@ -302,7 +320,7 @@ export class HoarderLifecycle implements HoarderController {
     }
   }
 
-  private activateS3Target(runtime: ActiveSession, target: S3TargetConfig): void {
+  private async activateS3Target(runtime: ActiveSession, target: S3TargetConfig): Promise<void> {
     runtime.config = { ...runtime.config!, storageTarget: "s3", s3: target };
     if (runtime.config.gitCatalogEnabled && runtime.isProjectTrusted) {
       runtime.projectCatalogService = this.dependencies.createProjectCatalogService(
@@ -310,6 +328,8 @@ export class HoarderLifecycle implements HoarderController {
         target,
       );
     }
+    await this.refreshDurableStatus(runtime);
+    this.assertSetupRuntimeCurrent(runtime, "activated");
     this.configureReplication(runtime);
     runtime.updateUi();
   }
@@ -321,9 +341,12 @@ export class HoarderLifecycle implements HoarderController {
     }
     const exclusion = this.exclusions.get(runtime);
     if (!exclusion) throw new Error("Session Hoarder maintenance is unavailable.");
-    return this.dependencies
+    const result = await this.dependencies
       .createPruneService(runtime.config.storageRoot, runtime.config.s3, exclusion)
       .prune(runtime.config.s3.targetId, confirmation);
+    await this.refreshDurableStatus(runtime);
+    runtime.updateUi();
+    return result;
   }
 
   async enableGitCatalog(expectedSessionId?: string): Promise<void> {
@@ -420,6 +443,9 @@ export class HoarderLifecycle implements HoarderController {
   ): Promise<void> {
     this.rekeyRuntime(runtime, repository);
     this.exclusions.set(runtime, this.dependencies.createMaintenanceExclusion(storageRoot));
+    runtime.statusQuery = this.dependencies.createStatusQuery(storageRoot);
+    await this.refreshDurableStatus(runtime);
+    if (!this.isRuntimeCurrent(runtime)) return;
     const checkpointService = this.dependencies.createCheckpointService(storageRoot);
     if (runtime.config?.gitCatalogEnabled && runtime.isProjectTrusted) {
       runtime.projectCatalogService = this.dependencies.createProjectCatalogService(
@@ -467,6 +493,8 @@ export class HoarderLifecycle implements HoarderController {
             );
             if (result && this.isRuntimeCurrent(runtime)) {
               runtime.record = result.record;
+              await this.refreshDurableStatus(runtime);
+              if (!this.isRuntimeCurrent(runtime)) return result;
               runtime.replicationCoordinator?.markRevision(result.record.revision);
               if (runtime.config?.storageTarget === "local") {
                 await this.publishProjectCatalog(runtime);
@@ -510,7 +538,10 @@ export class HoarderLifecycle implements HoarderController {
               signal,
             );
             if (result && this.isReplicationCurrent(runtime, coordinator, target.targetId)) {
-              await this.publishProjectCatalog(runtime);
+              await this.refreshDurableStatus(runtime);
+              if (this.isReplicationCurrent(runtime, coordinator, target.targetId)) {
+                await this.publishProjectCatalog(runtime);
+              }
             }
             return result;
           }, signal),
@@ -590,6 +621,18 @@ export class HoarderLifecycle implements HoarderController {
     }
   }
 
+  private async refreshDurableStatus(runtime: ActiveSession): Promise<void> {
+    if (!runtime.statusQuery || !runtime.config) return;
+    const sequence = runtime.beginStatusRefresh();
+    const durable = await runtime.statusQuery.read({
+      repositoryId: runtime.repository.repositoryId,
+      sessionId: runtime.sessionId,
+      config: runtime.config,
+    });
+    if (!this.isRuntimeCurrent(runtime)) return;
+    runtime.applyDurableStatus(sequence, durable);
+  }
+
   private exclusionFor(runtime: ActiveSession): MaintenanceExclusion {
     const exclusion = this.exclusions.get(runtime);
     if (!exclusion) throw new Error("Session Hoarder maintenance is unavailable.");
@@ -655,15 +698,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function uniqueArchiveObjects(
-  record: SessionArchiveRecord,
-): readonly SessionArchiveRecord["sessionObject"][] {
-  const objects = new Map<string, SessionArchiveRecord["sessionObject"]>();
-  objects.set(record.sessionObject.digest, record.sessionObject);
-  for (const artifact of record.artifacts) {
-    if (artifact.object) objects.set(artifact.object.digest, artifact.object);
-  }
-  return [...objects.values()];
+function selectedTargetLabel(runtime: ActiveSession, target: StorageTarget): string {
+  return target === "s3" ? `s3:${runtime.config!.s3!.targetId}` : "local";
 }
 
 function createActiveSessionHost(ctx: ExtensionContext): ActiveSessionHost {

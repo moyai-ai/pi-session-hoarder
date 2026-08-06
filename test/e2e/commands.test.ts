@@ -127,11 +127,11 @@ describe("/hoarder", () => {
     } as unknown as ExtensionCommandContext);
 
     expect(notify).toHaveBeenCalledWith(
-      expect.stringContaining("Local revision:      00002"),
+      expect.stringContaining("Local revision:       00002"),
       "info",
     );
     expect(notify).toHaveBeenCalledWith(
-      expect.stringContaining("Storage root:        /archive"),
+      expect.stringContaining("Storage root:         /archive"),
       "info",
     );
   });

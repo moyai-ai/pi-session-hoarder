@@ -29,6 +29,7 @@ import type { S3TargetConfig } from "./application/configuration.js";
 import type { Clock } from "./application/ports.js";
 import { ReplicationCoordinator } from "./application/replication-coordinator.js";
 import { ReplicationApplicationService } from "./application/replication-service.js";
+import { LocalHoarderStatusQuery } from "./application/status-query.js";
 import { SerializedMaintenanceExclusion } from "./application/maintenance-exclusion.js";
 import type { MaintenanceExclusion } from "./application/maintenance-exclusion.js";
 import { PruneApplicationService } from "./application/prune-service.js";
@@ -89,6 +90,14 @@ function createProjectCatalogApplication(
   });
 }
 
+export function createLocalStatusQuery(storageRoot: string): LocalHoarderStatusQuery {
+  return new LocalHoarderStatusQuery({
+    archives: new LocalSessionArchiveRepository(storageRoot),
+    replicas: new LocalSessionReplicaRepository(storageRoot),
+    local: new LocalFileObjectStore(storageRoot),
+  });
+}
+
 export function createPruneApplication(
   storageRoot: string,
   target: S3TargetConfig,
@@ -123,6 +132,7 @@ export function bootstrapSessionHoarder(pi: ExtensionAPI): void {
     loadConfiguration: loadConfig,
     resolveRepository: resolveRepositoryIdentity,
     createCheckpointService: (storageRoot) => createLocalCheckpointApplication(storageRoot).service,
+    createStatusQuery: createLocalStatusQuery,
     createCoordinator: (options) => new CheckpointCoordinator(options),
     createReplicationService: createS3ReplicationApplication,
     createReplicationCoordinator: (options) => new ReplicationCoordinator(options),

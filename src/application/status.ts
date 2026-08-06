@@ -1,5 +1,6 @@
-import type { HoarderConfig } from "./configuration.js";
 import type { CheckpointStatus, SessionArchiveRecord } from "../domain/model.js";
+import type { HoarderConfig } from "./configuration.js";
+import type { HoarderDurableStatus } from "./status-query.js";
 
 export interface HoarderStatusSnapshot {
   sessionId?: string;
@@ -10,6 +11,7 @@ export interface HoarderStatusSnapshot {
   record?: SessionArchiveRecord;
   initializationError?: string;
   configurationWarning?: string;
+  durable?: HoarderDurableStatus;
   publishedRevision?: number;
   remoteState?: string;
 }
@@ -34,37 +36,74 @@ export function formatFooterStatus(
 }
 
 export function formatDetailedStatus(snapshot: HoarderStatusSnapshot): string {
-  const localRevision = snapshot.record?.revision;
-  const target = targetLabel(snapshot.config);
-  const publishedRevision =
-    snapshot.publishedRevision ??
-    (snapshot.config?.storageTarget === "local" ? localRevision : undefined);
-  const rows: Array<readonly [string, string]> = [
+  return formatRows([
+    ...summaryRows(snapshot),
+    ...durabilityRows(snapshot),
+    ...archiveRows(snapshot.record),
+    ...warningRows(snapshot),
+    ...errorRows(snapshot),
+  ]);
+}
+
+function summaryRows(snapshot: HoarderStatusSnapshot): Array<readonly [string, string]> {
+  const localRevision = snapshot.durable?.localRevision ?? snapshot.record?.revision;
+  return [
     ["Hoarder", describeState(snapshot)],
     ["Storage root", snapshot.config?.storageRoot ?? "unavailable"],
     ["Session", snapshot.sessionId ?? "none"],
     ["Local revision", formatRevision(localRevision)],
-    ["Published revision", formatRevision(publishedRevision)],
-    ["Target", target],
+    ["Published revision", formatRevision(publishedRevision(snapshot, localRevision))],
+    ["Target", snapshot.durable?.target ?? targetLabel(snapshot.config)],
     ["Remote", snapshot.remoteState ?? defaultRemoteState(snapshot.config)],
   ];
-  if (snapshot.record) {
-    rows.push(
-      ["Source", formatBytes(snapshot.record.source.size)],
-      [
-        "Stored",
-        `${formatBytes(snapshot.record.sessionObject.storedBytes)} (${formatBytes(snapshot.record.sessionObject.logicalBytes)} logical)`,
-      ],
-      ["Artifacts", String(snapshot.record.artifacts.length)],
-      ["Last success", snapshot.record.capturedAt],
-    );
-  }
+}
+
+function durabilityRows(snapshot: HoarderStatusSnapshot): Array<readonly [string, string]> {
+  return [
+    ["Remote-only objects", formatCount(snapshot.durable?.remoteOnlyObjects ?? 0)],
+    ["Remote-only size", formatBytes(snapshot.durable?.remoteOnlyStoredBytes ?? 0)],
+    ["Lazy retrieval", snapshot.durable?.lazyRetrieval ?? defaultLazyRetrieval(snapshot.config)],
+  ];
+}
+
+function archiveRows(record: SessionArchiveRecord | undefined): Array<readonly [string, string]> {
+  if (!record) return [];
+  return [
+    ["Source", formatBytes(record.source.size)],
+    [
+      "Stored",
+      `${formatBytes(record.sessionObject.storedBytes)} (${formatBytes(record.sessionObject.logicalBytes)} logical)`,
+    ],
+    ["Artifacts", String(record.artifacts.length)],
+    ["Last success", record.capturedAt],
+  ];
+}
+
+function warningRows(snapshot: HoarderStatusSnapshot): Array<readonly [string, string]> {
+  const rows: Array<readonly [string, string]> = [];
   if (snapshot.configurationWarning) rows.push(["Config warning", snapshot.configurationWarning]);
+  if (snapshot.durable?.warnings.length) {
+    rows.push(["Status warning", snapshot.durable.warnings.join(" ")]);
+  }
+  return rows;
+}
+
+function errorRows(snapshot: HoarderStatusSnapshot): Array<readonly [string, string]> {
   const error =
     snapshot.initializationError ??
     (snapshot.checkpoint.state === "error" ? snapshot.checkpoint.error.message : undefined);
-  if (error) rows.push(["Last error", error]);
-  return formatRows(rows);
+  return error ? [["Last error", error]] : [];
+}
+
+function publishedRevision(
+  snapshot: HoarderStatusSnapshot,
+  localRevision: number | undefined,
+): number | undefined {
+  return (
+    snapshot.durable?.publishedRevision ??
+    snapshot.publishedRevision ??
+    (snapshot.config?.storageTarget === "local" ? localRevision : undefined)
+  );
 }
 
 function targetLabel(config: HoarderConfig | undefined): string {
@@ -77,6 +116,11 @@ function defaultRemoteState(config: HoarderConfig | undefined): string {
   return config.s3 ? "not synchronized" : "configuration required";
 }
 
+function defaultLazyRetrieval(config: HoarderConfig | undefined): string {
+  if (!config || config.storageTarget === "local") return "off";
+  return config.s3 ? "enabled" : "unavailable";
+}
+
 function formatRows(rows: readonly (readonly [string, string])[]): string {
   const width = Math.max(...rows.map(([label]) => label.length)) + 3;
   return rows.map(([label, value]) => `${label}:`.padEnd(width) + value).join("\n");
@@ -84,6 +128,10 @@ function formatRows(rows: readonly (readonly [string, string])[]): string {
 
 function formatRevision(revision: number | undefined): string {
   return revision === undefined ? "none" : String(revision).padStart(5, "0");
+}
+
+function formatCount(count: number): string {
+  return String(count).padStart(5, "0");
 }
 
 function describeState(snapshot: HoarderStatusSnapshot): string {
