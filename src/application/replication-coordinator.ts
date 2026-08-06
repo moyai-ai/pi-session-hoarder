@@ -87,18 +87,24 @@ export class ReplicationCoordinator {
     return this.desiredRevision === undefined ? this.latestResult : this.drain();
   }
 
-  async shutdown(): Promise<void> {
+  async shutdownAndDrain(): Promise<void> {
     if (this.disposed) return;
     this.cancelTimer();
-    const drain = this.desiredRevision === undefined ? Promise.resolve(undefined) : this.drain();
+    const drain =
+      this.drainPromise ??
+      (this.desiredRevision === undefined ? Promise.resolve(undefined) : this.drain());
     await awaitBounded(drain, this.options.shutdownTimeoutMs, this.scheduler);
-    this.dispose();
+    this.cancelWithoutDrain();
   }
 
-  dispose(): void {
+  cancelWithoutDrain(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.releasePendingWork();
+  }
+
+  dispose(): void {
+    this.cancelWithoutDrain();
   }
 
   private releasePendingWork(): void {
@@ -144,6 +150,7 @@ export class ReplicationCoordinator {
     this.publish(this.runningStatus(revision));
     try {
       const result = await this.options.runner.run(this.abortController.signal);
+      if (this.disposed || this.abortController.signal.aborted) return { stop: true };
       if (result) {
         this.latestResult = result;
         this.publishedRevision = Math.max(this.publishedRevision ?? 0, result.record.revision);
@@ -182,6 +189,7 @@ export class ReplicationCoordinator {
   }
 
   private publish(status: ReplicationStatus): void {
+    if (this.disposed) return;
     this.status = status;
     if (this.isCurrent()) this.options.onStatus?.(structuredClone(status));
   }

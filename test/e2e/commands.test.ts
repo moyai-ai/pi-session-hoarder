@@ -26,6 +26,14 @@ function record(): SessionArchiveRecord {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function setup(controllerOverrides: Partial<HoarderController> = {}) {
   let command: { handler(args: string, ctx: ExtensionCommandContext): Promise<void> } | undefined;
   const api = {
@@ -178,6 +186,24 @@ describe("/hoarder", () => {
       `Session Hoarder storage target is now ${target === "s3" ? "s3:backup" : "local"}.`,
       "info",
     );
+  });
+
+  it("reports local selection only after transition completion", async () => {
+    const selection = deferred<string>();
+    const selectStorageTarget = vi.fn(() => selection.promise);
+    const { command, notify } = setup({ selectStorageTarget });
+    const ctx = {
+      ui: { notify },
+      sessionManager: { getSessionId: () => "session" },
+    } as unknown as ExtensionCommandContext;
+
+    const handling = command.handler("storage local", ctx);
+    await Promise.resolve();
+    expect(notify).not.toHaveBeenCalled();
+    selection.resolve("local");
+    await handling;
+
+    expect(notify).toHaveBeenCalledWith("Session Hoarder storage target is now local.", "info");
   });
 
   it("previews and reports confirmed prune results with aligned output", async () => {

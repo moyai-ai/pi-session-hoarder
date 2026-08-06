@@ -121,7 +121,7 @@ S3-compatible durability is selected with:
 /hoarder storage s3
 ```
 
-The local CAS remains the checkpoint and staging path. Verified gzip objects are replicated to the configured S3 target in the background. Switching back with `/hoarder storage local` changes the target for new objects without downloading remote-only history.
+The local CAS remains the checkpoint and staging path. Verified gzip objects are replicated to the configured S3 target in the background. Switching back with `/hoarder storage local` synchronously cancels queued or active replication before persisting the local selection. It starts no additional S3 requests, downloads no remote-only history, deletes no remote objects, and does not rewrite committed project catalogs. Existing verified S3 receipts remain available for later explicit retrieval, and selecting S3 again resumes from the newest committed local archive state.
 
 Lazy retrieval verifies encoded transport bytes and the uncompressed logical SHA-256 before atomically reinstalling an object into local CAS. `/hoarder prune` is available only while S3 is selected and removes only exact receipt-backed local CAS objects after confirmation when UI is available.
 

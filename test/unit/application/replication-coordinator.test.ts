@@ -132,6 +132,90 @@ describe("ReplicationCoordinator", () => {
     expect(onStatus).not.toHaveBeenLastCalledWith({ state: "idle", publishedRevision: 2 });
   });
 
+  it("does not drain a pending revision during target cancellation", async () => {
+    const scheduler = new FakeScheduler();
+    const run = vi.fn(async () => result(1));
+    const coordinator = new ReplicationCoordinator({
+      debounceMs: 10,
+      shutdownTimeoutMs: 10,
+      scheduler,
+      runner: { run },
+    });
+    coordinator.markRevision(1);
+
+    coordinator.cancelWithoutDrain();
+    scheduler.runAll();
+    await settle();
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("aborts active work, drops queued revisions, and ignores late success", async () => {
+    const active = deferred<ReplicateSessionResult>();
+    const onStatus = vi.fn();
+    let signal: AbortSignal | undefined;
+    const run = vi.fn(async (value: AbortSignal) => {
+      signal = value;
+      return active.promise;
+    });
+    const coordinator = new ReplicationCoordinator({
+      debounceMs: 0,
+      shutdownTimeoutMs: 10,
+      runner: { run },
+      onStatus,
+    });
+
+    const flushing = coordinator.flush(1);
+    await settle();
+    coordinator.markRevision(2);
+    coordinator.cancelWithoutDrain();
+    const statusCallsAtCancellation = onStatus.mock.calls.length;
+
+    expect(signal?.aborted).toBe(true);
+    active.resolve(result(1));
+    await expect(flushing).resolves.toBeUndefined();
+    await settle();
+
+    expect(run).toHaveBeenCalledOnce();
+    expect(onStatus).toHaveBeenCalledTimes(statusCallsAtCancellation);
+    expect(coordinator.getStatus()).not.toMatchObject({ publishedRevision: 1 });
+  });
+
+  it("drops a failed revision instead of retrying it after cancellation", async () => {
+    const run = vi.fn(async () => {
+      throw new Error("network down");
+    });
+    const coordinator = new ReplicationCoordinator({
+      debounceMs: 0,
+      shutdownTimeoutMs: 10,
+      runner: { run },
+    });
+
+    await coordinator.flush(3);
+    expect(coordinator.getStatus()).toMatchObject({ state: "error", localRevision: 3 });
+    coordinator.cancelWithoutDrain();
+    await expect(coordinator.flush()).resolves.toBeUndefined();
+
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("keeps cancellation idempotent", () => {
+    const scheduler = new FakeScheduler();
+    const coordinator = new ReplicationCoordinator({
+      debounceMs: 0,
+      shutdownTimeoutMs: 10,
+      scheduler,
+      runner: { run: vi.fn() },
+    });
+    coordinator.markRevision(1);
+
+    coordinator.cancelWithoutDrain();
+    coordinator.cancelWithoutDrain();
+    coordinator.dispose();
+
+    expect(coordinator.getStatus()).toMatchObject({ state: "pending", localRevision: 1 });
+  });
+
   it("bounds shutdown and aborts late remote work", async () => {
     const scheduler = new FakeScheduler();
     const pending = deferred<ReplicateSessionResult>();
@@ -148,7 +232,7 @@ describe("ReplicationCoordinator", () => {
       },
     });
     coordinator.markRevision(1);
-    const shutdown = coordinator.shutdown();
+    const shutdown = coordinator.shutdownAndDrain();
     await settle();
     scheduler.runAll();
     await shutdown;

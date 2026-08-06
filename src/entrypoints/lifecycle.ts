@@ -157,9 +157,24 @@ export class HoarderLifecycle implements HoarderController {
     if (target === "s3" && !runtime.config.s3) {
       throw new Error("No S3 target is configured in the global Session Hoarder config.");
     }
-    await this.dependencies.configurationWriter.selectStorageTarget(target);
+
+    if (target === "local") this.cancelReplication(runtime);
+    try {
+      await this.dependencies.configurationWriter.selectStorageTarget(target);
+    } catch (error) {
+      if (target === "local" && this.isRuntimeCurrent(runtime)) {
+        runtime.replication = replicationSelectionFailure(runtime, error);
+        runtime.updateUi();
+      }
+      throw error;
+    }
+
+    if (!this.isRuntimeCurrent(runtime)) {
+      throw new Error("The active Pi session changed before storage selection could complete.");
+    }
     runtime.config = { ...runtime.config, storageTarget: target };
-    await this.configureReplication(runtime);
+    if (target === "s3") this.configureReplication(runtime);
+    else runtime.replication = { state: "off" };
     runtime.updateUi();
     return target === "s3" ? `s3:${runtime.config.s3!.targetId}` : "local";
   }
@@ -210,7 +225,7 @@ export class HoarderLifecycle implements HoarderController {
     const runtime = this.currentRuntime();
     if (!runtime) return;
     runtime.coordinator?.dispose();
-    runtime.replicationCoordinator?.dispose();
+    this.cancelReplication(runtime);
     runtime.stopUi();
     this.runtimes.delete(runtime.key);
     this.currentKey = undefined;
@@ -278,7 +293,7 @@ export class HoarderLifecycle implements HoarderController {
     }
     runtime.checkpoint = { state: "idle" };
     runtime.coordinator = this.createCoordinator(runtime, checkpointService);
-    await this.configureReplication(runtime);
+    this.configureReplication(runtime);
     runtime.updateUi();
     void runtime.coordinator.flush("startup-recovery");
   }
@@ -327,26 +342,23 @@ export class HoarderLifecycle implements HoarderController {
     });
   }
 
-  private async configureReplication(runtime: ActiveSession): Promise<void> {
-    if (runtime.replicationCoordinator) {
-      await runtime.replicationCoordinator.shutdown();
-      runtime.replicationCoordinator = undefined;
-    }
+  private configureReplication(runtime: ActiveSession): void {
+    this.cancelReplication(runtime);
     if (runtime.config?.storageTarget !== "s3" || !runtime.config.s3) {
       runtime.replication = { state: "off" };
       return;
     }
 
-    const service = this.dependencies.createReplicationService(
-      runtime.config.storageRoot,
-      runtime.config.s3,
-    );
+    const target = runtime.config.s3;
+    const service = this.dependencies.createReplicationService(runtime.config.storageRoot, target);
     runtime.replication = { state: "idle" };
-    runtime.replicationCoordinator = this.dependencies.createReplicationCoordinator({
+    let coordinator!: ReplicationCoordinator;
+    coordinator = this.dependencies.createReplicationCoordinator({
       debounceMs: runtime.config.debounceMs,
       shutdownTimeoutMs: runtime.config.shutdownTimeoutMs,
-      isCurrent: () => this.isRuntimeCurrent(runtime),
+      isCurrent: () => this.isReplicationCurrent(runtime, coordinator, target.targetId),
       onStatus: (status) => {
+        if (!this.isReplicationCurrent(runtime, coordinator, target.targetId)) return;
         runtime.replication = status;
         runtime.updateUi();
       },
@@ -355,27 +367,34 @@ export class HoarderLifecycle implements HoarderController {
           this.exclusionFor(runtime).runActivity(async () => {
             const result = await service.sync(
               {
-                targetId: runtime.config!.s3!.targetId,
+                targetId: target.targetId,
                 repositoryId: runtime.repository.repositoryId,
                 sessionId: runtime.sessionId,
               },
               signal,
             );
-            if (result && this.isRuntimeCurrent(runtime)) {
+            if (result && this.isReplicationCurrent(runtime, coordinator, target.targetId)) {
               await this.publishProjectCatalog(runtime);
             }
             return result;
           }, signal),
       },
     });
-    if (runtime.record) runtime.replicationCoordinator.markRevision(runtime.record.revision);
+    runtime.replicationCoordinator = coordinator;
+    if (runtime.record) coordinator.markRevision(runtime.record.revision);
+  }
+
+  private cancelReplication(runtime: ActiveSession): void {
+    const coordinator = runtime.replicationCoordinator;
+    runtime.replicationCoordinator = undefined;
+    coordinator?.cancelWithoutDrain();
   }
 
   private async stopSession(ctx: ExtensionContext): Promise<void> {
     const runtime = this.runtimeForContext(ctx);
     if (!runtime) return;
     await runtime.coordinator?.shutdown("shutdown");
-    await runtime.replicationCoordinator?.shutdown();
+    await runtime.replicationCoordinator?.shutdownAndDrain();
     runtime.coordinator?.dispose();
     runtime.replicationCoordinator?.dispose();
     runtime.stopUi();
@@ -448,6 +467,41 @@ export class HoarderLifecycle implements HoarderController {
   private isRuntimeCurrent(runtime: ActiveSession): boolean {
     return this.currentKey === runtime.key && this.generation === runtime.generation;
   }
+
+  private isReplicationCurrent(
+    runtime: ActiveSession,
+    coordinator: ReplicationCoordinator,
+    targetId: string,
+  ): boolean {
+    return (
+      this.isRuntimeCurrent(runtime) &&
+      runtime.replicationCoordinator === coordinator &&
+      runtime.config?.storageTarget === "s3" &&
+      runtime.config.s3?.targetId === targetId
+    );
+  }
+}
+
+function replicationSelectionFailure(
+  runtime: ActiveSession,
+  error: unknown,
+): ActiveSession["replication"] {
+  const previous = runtime.replication;
+  const localRevision =
+    runtime.record?.revision ?? ("localRevision" in previous ? previous.localRevision : 0);
+  const publishedRevision =
+    "publishedRevision" in previous ? previous.publishedRevision : undefined;
+  return {
+    state: "error",
+    localRevision,
+    ...(publishedRevision ? { publishedRevision } : {}),
+    error: {
+      code: "STORAGE_SELECTION_FAILED",
+      message: `Local selection failed; remote replication is paused: ${errorMessage(error)}`,
+      occurredAt: new Date().toISOString(),
+      retryable: true,
+    },
+  };
 }
 
 function syncResultWithProjection(

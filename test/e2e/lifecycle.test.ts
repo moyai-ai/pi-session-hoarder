@@ -7,7 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConfigLoadResult } from "../../src/application/configuration.js";
 import { CheckpointCoordinator } from "../../src/application/checkpoint-coordinator.js";
 import type { CheckpointApplicationService } from "../../src/application/checkpoint-service.js";
-import { ReplicationCoordinator } from "../../src/application/replication-coordinator.js";
+import {
+  ReplicationCoordinator,
+  type ReplicationCoordinatorScheduler,
+} from "../../src/application/replication-coordinator.js";
 import { SerializedMaintenanceExclusion } from "../../src/application/maintenance-exclusion.js";
 import type { ReplicationApplicationService } from "../../src/application/replication-service.js";
 import { createLocalCheckpointApplication } from "../../src/bootstrap.js";
@@ -19,6 +22,28 @@ import {
 
 const temporaryDirectories: string[] = [];
 type Handler = (...args: never[]) => unknown;
+
+class ManualReplicationScheduler implements ReplicationCoordinatorScheduler {
+  private nextId = 0;
+  private readonly callbacks = new Map<number, () => void>();
+
+  setTimeout(callback: () => void): unknown {
+    const id = ++this.nextId;
+    this.callbacks.set(id, callback);
+    return id;
+  }
+
+  clearTimeout(handle: unknown): void {
+    this.callbacks.delete(handle as number);
+  }
+
+  runAll(): void {
+    for (const [id, callback] of this.callbacks) {
+      this.callbacks.delete(id);
+      callback();
+    }
+  }
+}
 
 class ManualUiScheduler implements UiScheduler {
   private nextId = 0;
@@ -149,6 +174,11 @@ async function fixture(
     uiScheduler,
   };
   return { directory, storageRoot, config, dependencies, uiScheduler };
+}
+
+async function settle(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 async function invoke(
@@ -399,6 +429,232 @@ describe("HoarderLifecycle", () => {
     expect(selected).toBe("local");
     expect(dependencies.configurationWriter.selectStorageTarget).toHaveBeenCalledWith("local");
     expect(lifecycle.getStatusSnapshot().config?.storageTarget).toBe("local");
+  });
+
+  it("cancels pending S3 work without starting a remote operation", async () => {
+    const { directory, config, dependencies } = await fixture(true, "s3");
+    config.config.debounceMs = 60_000;
+    const scheduler = new ManualReplicationScheduler();
+    const remoteSync = vi.fn(async () => undefined);
+    dependencies.createReplicationService = vi.fn(
+      () => ({ sync: remoteSync }) as unknown as ReplicationApplicationService,
+    );
+    dependencies.createReplicationCoordinator = (options) =>
+      new ReplicationCoordinator({ ...options, scheduler });
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    await vi.waitFor(() =>
+      expect(lifecycle.getStatusSnapshot().record).toMatchObject({ revision: 1 }),
+    );
+    expect(remoteSync).not.toHaveBeenCalled();
+
+    await lifecycle.selectStorageTarget("local", "session");
+    scheduler.runAll();
+    await settle();
+
+    expect(remoteSync).not.toHaveBeenCalled();
+    expect(lifecycle.getStatusSnapshot()).toMatchObject({
+      config: { storageTarget: "local" },
+      remoteState: "off",
+    });
+  });
+
+  it("aborts active S3 work and continues checkpointing locally without a follow-up request", async () => {
+    const { directory, dependencies } = await fixture(true, "s3");
+    let remoteSignal: AbortSignal | undefined;
+    const remoteSync = vi.fn(
+      async (_command: unknown, signal?: AbortSignal): Promise<undefined> => {
+        remoteSignal = signal;
+        await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    );
+    dependencies.createReplicationService = vi.fn(
+      () => ({ sync: remoteSync }) as unknown as ReplicationApplicationService,
+    );
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    await vi.waitFor(() => expect(remoteSync).toHaveBeenCalledOnce());
+
+    await lifecycle.selectStorageTarget("local", "session");
+    expect(remoteSignal?.aborted).toBe(true);
+    await appendFile(sessionFile, `${JSON.stringify({ type: "message", id: "local" })}\n`);
+    const local = await lifecycle.sync("session");
+
+    expect(local.checkpoint?.record.revision).toBe(2);
+    expect(remoteSync).toHaveBeenCalledOnce();
+    expect(lifecycle.getStatusSnapshot().remoteState).toBe("off");
+  });
+
+  it("ignores a late success from the cancelled target without publishing a project catalog", async () => {
+    const { directory, config, dependencies } = await fixture(true, "s3");
+    config.config.gitCatalogEnabled = true;
+    let finishRemote!: (value: Awaited<ReturnType<ReplicationApplicationService["sync"]>>) => void;
+    const remoteResult = new Promise<Awaited<ReturnType<ReplicationApplicationService["sync"]>>>(
+      (resolve) => {
+        finishRemote = resolve;
+      },
+    );
+    const remoteSync = vi.fn(async () => remoteResult);
+    dependencies.createReplicationService = vi.fn(
+      () => ({ sync: remoteSync }) as unknown as ReplicationApplicationService,
+    );
+    const publish = vi.fn(async () => ({ revision: 1, path: "catalog.json" }));
+    dependencies.createProjectCatalogService = vi.fn(() => ({ publish }) as never);
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    await vi.waitFor(() => expect(remoteSync).toHaveBeenCalledOnce());
+    await lifecycle.selectStorageTarget("local", "session");
+    finishRemote(undefined);
+    await settle();
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(lifecycle.getStatusSnapshot().remoteState).toBe("off");
+  });
+
+  it("keeps S3 cancelled when local config persistence fails", async () => {
+    const { directory, config, dependencies } = await fixture(true, "s3");
+    config.config.debounceMs = 60_000;
+    const scheduler = new ManualReplicationScheduler();
+    const remoteSync = vi.fn(async () => undefined);
+    dependencies.createReplicationService = vi.fn(
+      () => ({ sync: remoteSync }) as unknown as ReplicationApplicationService,
+    );
+    dependencies.createReplicationCoordinator = (options) =>
+      new ReplicationCoordinator({ ...options, scheduler });
+    dependencies.configurationWriter.selectStorageTarget = vi.fn(async () => {
+      throw new Error("config disk full");
+    });
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    await vi.waitFor(() =>
+      expect(lifecycle.getStatusSnapshot().record).toMatchObject({ revision: 1 }),
+    );
+
+    await expect(lifecycle.selectStorageTarget("local", "session")).rejects.toThrow(
+      "config disk full",
+    );
+    scheduler.runAll();
+    await settle();
+
+    expect(remoteSync).not.toHaveBeenCalled();
+    expect(lifecycle.getStatusSnapshot()).toMatchObject({
+      config: { storageTarget: "s3" },
+      remoteState: "retry pending",
+    });
+  });
+
+  it("switches S3 to local and back using the newest committed local revision", async () => {
+    const { directory, dependencies } = await fixture(true, "local", true);
+    const scheduler = new ManualReplicationScheduler();
+    const remoteSync = vi.fn(async () => undefined);
+    dependencies.createReplicationService = vi.fn(
+      () => ({ sync: remoteSync }) as unknown as ReplicationApplicationService,
+    );
+    dependencies.createReplicationCoordinator = (options) =>
+      new ReplicationCoordinator({ ...options, scheduler });
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    expect((await lifecycle.sync("session")).checkpoint?.record.revision).toBe(1);
+    await lifecycle.selectStorageTarget("s3", "session");
+    await lifecycle.selectStorageTarget("local", "session");
+    scheduler.runAll();
+    await settle();
+    expect(remoteSync).not.toHaveBeenCalled();
+
+    await appendFile(sessionFile, `${JSON.stringify({ type: "message", id: "newest" })}\n`);
+    expect((await lifecycle.sync("session")).checkpoint?.record.revision).toBe(2);
+    await lifecycle.selectStorageTarget("s3", "session");
+    scheduler.runAll();
+    await vi.waitFor(() => expect(remoteSync).toHaveBeenCalledOnce());
+
+    expect(dependencies.createReplicationService).toHaveBeenCalledTimes(2);
+    expect(lifecycle.getStatusSnapshot().config?.storageTarget).toBe("s3");
+  });
+
+  it("cancels the previous coordinator when the S3 target is reselected", async () => {
+    const { directory, config, dependencies } = await fixture(true, "s3");
+    config.config.debounceMs = 60_000;
+    const scheduler = new ManualReplicationScheduler();
+    const coordinators: ReplicationCoordinator[] = [];
+    const remoteSync = vi.fn(async () => undefined);
+    dependencies.createReplicationService = vi.fn(
+      () => ({ sync: remoteSync }) as unknown as ReplicationApplicationService,
+    );
+    dependencies.createReplicationCoordinator = (options) => {
+      const coordinator = new ReplicationCoordinator({ ...options, scheduler });
+      coordinators.push(coordinator);
+      return coordinator;
+    };
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    await vi.waitFor(() =>
+      expect(lifecycle.getStatusSnapshot().record).toMatchObject({ revision: 1 }),
+    );
+    const cancelFirst = vi.spyOn(coordinators[0]!, "cancelWithoutDrain");
+
+    await lifecycle.selectStorageTarget("s3", "session");
+    scheduler.runAll();
+    await vi.waitFor(() => expect(remoteSync).toHaveBeenCalledOnce());
+
+    expect(cancelFirst).toHaveBeenCalledOnce();
+    expect(coordinators).toHaveLength(2);
+    expect(dependencies.createReplicationService).toHaveBeenCalledTimes(2);
   });
 
   it("constructs remote behavior only when switching to a configured S3 target", async () => {
