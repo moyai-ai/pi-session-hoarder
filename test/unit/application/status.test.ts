@@ -44,7 +44,7 @@ describe("status formatting", () => {
       publishedRevision: 14,
       remoteState: "retry pending",
       record: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         repositoryId: "repo",
         sessionId: "session",
         revision: 15,
@@ -84,7 +84,7 @@ describe("status formatting", () => {
       },
       checkpoint: { state: "idle", revision: 100_000 },
       record: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         repositoryId: "repo",
         sessionId: "session",
         revision: 100_000,

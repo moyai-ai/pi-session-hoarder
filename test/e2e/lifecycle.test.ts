@@ -970,6 +970,32 @@ describe("HoarderLifecycle", () => {
     expect(result.projection).toMatchObject({ revision: 1 });
   });
 
+  it("keeps a local checkpoint successful when same-revision catalog publication fails", async () => {
+    const { directory, config, dependencies } = await fixture();
+    config.config.gitCatalogEnabled = true;
+    const publish = vi.fn(async () => {
+      throw new Error("Project catalog revision 1 is immutable");
+    });
+    dependencies.createProjectCatalogService = vi.fn(() => ({ publish }) as never);
+    const sessionFile = join(directory, "session.jsonl");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n`,
+    );
+    const lifecycle = new HoarderLifecycle(dependencies);
+    const { handlers, api } = fakePi();
+    lifecycle.register(api);
+    const { context } = fakeContext("session", sessionFile, directory);
+
+    await invoke(handlers.get("session_start"), { reason: "startup" }, context);
+    const result = await lifecycle.sync("session");
+
+    expect(result.checkpoint?.record.revision).toBe(1);
+    expect(result.projection).toBeUndefined();
+    expect(result.projectionError).toContain("immutable");
+    expect(lifecycle.getStatusSnapshot().record?.revision).toBe(1);
+  });
+
   it("does not construct project catalog behavior while disabled", async () => {
     const { directory, dependencies } = await fixture();
     const sessionFile = join(directory, "session.jsonl");

@@ -428,6 +428,75 @@ describe("MinIO S3 compatibility", () => {
     expect(confirm).toHaveBeenCalledOnce();
   });
 
+  it("preserves a deleted sidecar through checkpoint, replication, prune, and retrieval", async () => {
+    const prefix = nextPrefix("preserved-sidecar");
+    const storageRoot = join(temporaryRoot, `${prefix}-local`);
+    const sessionFile = join(temporaryRoot, `${prefix}.jsonl`);
+    const sidecar = join(temporaryRoot, `${prefix}.log`);
+    const identity = { repositoryId: "repo", sessionId: "session" };
+    const target = environment.target(prefix);
+    const remote = repository(prefix) as S3ReplicaObjectRepository;
+    const checkpoint = createLocalCheckpointApplication(storageRoot).service;
+    const replication = new ReplicationApplicationService({
+      archives: new LocalSessionArchiveRepository(storageRoot),
+      source: new LocalEncodedObjectSource(new LocalFileObjectStore(storageRoot)),
+      verifier: new StreamingEncodedObjectVerifier(),
+      unitOfWorkFactory: new LocalReplicationUnitOfWorkFactory(storageRoot, () => remote),
+      clock: { now: () => new Date("2026-08-06T12:00:00.000Z") },
+    });
+    await writeFile(sidecar, "complete preserved output");
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n${JSON.stringify(
+        bashToolResult("artifact", sidecar),
+      )}\n`,
+    );
+    const first = await checkpoint.checkpoint({ ...identity, sessionFile });
+    const artifact = first?.record.artifacts[0]?.object;
+    if (!artifact) throw new Error("expected captured artifact");
+    await replication.sync({ targetId: "minio", ...identity });
+    await rm(sidecar);
+    await writeFile(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n${JSON.stringify(
+        bashToolResult("artifact", sidecar),
+      )}\n${JSON.stringify({ type: "custom", id: "changed" })}\n`,
+    );
+
+    const second = await checkpoint.checkpoint({ ...identity, sessionFile });
+    expect(second?.record.artifacts[0]).toMatchObject({
+      sourceState: "missing",
+      archiveState: "captured",
+      object: artifact,
+    });
+    const replicated = await replication.sync({ targetId: "minio", ...identity });
+    const receipt = replicated?.record.objects.find(
+      (candidate) => candidate.object.digest === artifact.digest,
+    );
+    if (!receipt) throw new Error("expected preserved artifact receipt");
+
+    const exclusion = new SerializedMaintenanceExclusion();
+    const prune = createPruneApplication(storageRoot, target, exclusion);
+    await expect(prune.prune("minio", { confirm: async () => true })).resolves.toMatchObject({
+      removedObjects: 2,
+      failedObjects: 0,
+    });
+    const localObjects = new LocalFileObjectStore(storageRoot);
+    await expect(localObjects.has(artifact.digest)).resolves.toBe(false);
+
+    const retrieval = new RetrievalApplicationService({
+      local: new LocalCasHydrationStore(localObjects),
+      remote,
+      confirmation: { confirm: async () => true },
+      confirmationThresholdBytes: Number.MAX_SAFE_INTEGER,
+      exclusion,
+    });
+    await expect(retrieval.hydrate({ object: artifact, receipt })).resolves.toMatchObject({
+      hydrated: true,
+    });
+    await expect(localObjects.verify(artifact)).resolves.toMatchObject({ valid: true });
+  });
+
   it("prunes only durable remote-backed CAS bytes and hydrates them again", async () => {
     const prefix = nextPrefix("prune-recovery");
     const storageRoot = join(temporaryRoot, `${prefix}-local`);
@@ -510,6 +579,24 @@ describe("MinIO S3 compatibility", () => {
     });
   }, 120_000);
 });
+
+function bashToolResult(id: string, fullOutputPath: string) {
+  return {
+    type: "message",
+    id,
+    parentId: null,
+    timestamp: "2026-08-06T12:00:00.000Z",
+    message: {
+      role: "toolResult",
+      toolCallId: `call-${id}`,
+      toolName: "bash",
+      content: [{ type: "text", text: "truncated" }],
+      details: { fullOutputPath },
+      isError: false,
+      timestamp: Date.parse("2026-08-06T12:00:00.000Z"),
+    },
+  };
+}
 
 async function encodedBytes(payload: EncodedObjectPayload): Promise<Buffer> {
   const chunks: Buffer[] = [];

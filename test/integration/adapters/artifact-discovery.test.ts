@@ -59,7 +59,8 @@ describe("discoverArtifacts", () => {
           kind: "pi-bash-full-output",
           sourceEntryId: "allowed",
           sourceField: "message.details.fullOutputPath",
-          state: "captured",
+          sourceState: "present",
+          archiveState: "unavailable",
         },
       },
     ]);
@@ -77,7 +78,14 @@ describe("discoverArtifacts", () => {
 
     const artifacts = await discovery.discover(session);
 
-    expect(artifacts.map((artifact) => artifact.relation.state)).toEqual(["missing", "invalid"]);
+    expect(artifacts.map((artifact) => artifact.relation.sourceState)).toEqual([
+      "missing",
+      "invalid",
+    ]);
+    expect(artifacts.map((artifact) => artifact.relation.archiveState)).toEqual([
+      "unavailable",
+      "unavailable",
+    ]);
     expect(artifacts[0]?.relation.warning).toContain(missing);
     expect(artifacts[1]?.relation.warning).toContain("not a regular file");
   });

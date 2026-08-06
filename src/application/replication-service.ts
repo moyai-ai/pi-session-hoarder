@@ -102,8 +102,6 @@ export class ReplicationApplicationService {
     uow: ReplicationUnitOfWork,
     signal?: AbortSignal,
   ): Promise<RemoteObjectReceipt> {
-    await this.assertLocalVerified(object, signal);
-
     const trusted = trustedReceipts.find(
       (receipt) =>
         sameObjectReference(object, receipt.object) && uow.objects.matches(object, receipt),
@@ -113,6 +111,7 @@ export class ReplicationApplicationService {
       if (verification.valid) return trusted;
     }
 
+    await this.assertLocalVerified(object, signal);
     const observation = await uow.objects.inspect(object, signal);
     if (observation.state === "untrusted-present") {
       return this.verifyUntrusted(object, observation, uow, signal);

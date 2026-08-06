@@ -37,7 +37,7 @@ export interface ProjectArtifactRelation extends Omit<ArtifactRelation, "object"
 }
 
 export interface ProjectSessionCatalog {
-  schemaVersion: 1;
+  schemaVersion: 2;
   repositoryId: string;
   sessionId: string;
   revision: number;
@@ -125,7 +125,7 @@ export class ProjectCatalogApplicationService {
     );
     const { worktreeRoot: _privatePath, ...safeGit } = git;
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       repositoryId: archive.repositoryId,
       sessionId: archive.sessionId,
       revision: archive.revision,
@@ -145,7 +145,8 @@ export class ProjectCatalogApplicationService {
       kind: artifact.kind,
       sourceEntryId: artifact.sourceEntryId,
       sourceField: artifact.sourceField,
-      state: artifact.state,
+      sourceState: artifact.sourceState,
+      archiveState: artifact.archiveState,
       ...(artifact.object
         ? { object: await this.projectObject(artifact.object, remote, selectedTarget) }
         : {}),

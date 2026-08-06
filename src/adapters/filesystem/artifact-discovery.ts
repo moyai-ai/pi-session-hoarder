@@ -49,21 +49,27 @@ export class PiSessionArtifactDiscovery implements ArtifactDiscovery {
             artifacts.push({
               relation: {
                 ...relationBase,
-                state: "invalid",
+                sourceState: "invalid",
+                archiveState: "unavailable",
                 warning: `Bash full output path is not a regular file: ${candidate.path}`,
               },
             });
           } else {
             artifacts.push({
               path: candidate.path,
-              relation: { ...relationBase, state: "captured" },
+              relation: {
+                ...relationBase,
+                sourceState: "present",
+                archiveState: "unavailable",
+              },
             });
           }
         } catch (error) {
           artifacts.push({
             relation: {
               ...relationBase,
-              state: "missing",
+              sourceState: "missing",
+              archiveState: "unavailable",
               warning: `Bash full output path is unavailable: ${candidate.path} (${errorMessage(error)})`,
             },
           });

@@ -3,6 +3,12 @@ import type {
   CheckpointUnitOfWorkFactory,
   ObjectStore,
 } from "../../application/ports.js";
+import {
+  artifactRelationKey,
+  sameObjectReference,
+  type ArtifactRelation,
+  type SessionArchiveRecord,
+} from "../../domain/model.js";
 import { ExplicitCommitState } from "./explicit-commit-state.js";
 import { LocalFileObjectStore } from "./local-object-store.js";
 import {
@@ -33,14 +39,31 @@ export class LocalCheckpointUnitOfWork implements CheckpointUnitOfWork {
       );
     }
     const [archive] = staged;
-    for (const object of archive!.referencedObjects()) {
-      if (!(await this.objects.has(object.digest))) {
-        throw new Error(`Archive cannot reference missing CAS object ${object.digest}.`);
-      }
-    }
+    const record = archive!.record!;
+    // The coordinator is the single writer; this prior-record read intentionally identifies
+    // exact artifact relations that may have become remote-only after their earlier commit.
+    const previous = await this.archives.committedRecord(archive!.identity);
+    await this.assertRequiredObjectsAvailable(record, previous);
     await this.archives.persist(archive!);
     this.archives.clear();
     this.state.markCommitted();
+  }
+
+  private async assertRequiredObjectsAvailable(
+    record: SessionArchiveRecord,
+    previous: SessionArchiveRecord | undefined,
+  ): Promise<void> {
+    if (!(await this.objects.has(record.sessionObject.digest))) {
+      throw new Error(
+        `Archive cannot reference missing CAS object ${record.sessionObject.digest}.`,
+      );
+    }
+    for (const artifact of record.artifacts) {
+      const object = artifact.object;
+      if (!object || (await this.objects.has(object.digest))) continue;
+      if (isPreservedArtifact(artifact, object, previous?.artifacts ?? [])) continue;
+      throw new Error(`Archive cannot reference missing CAS object ${object.digest}.`);
+    }
   }
 
   rollback(): Promise<void> {
@@ -50,6 +73,19 @@ export class LocalCheckpointUnitOfWork implements CheckpointUnitOfWork {
   dispose(): Promise<void> {
     return this.state.dispose(() => this.rollback());
   }
+}
+
+function isPreservedArtifact(
+  artifact: ArtifactRelation,
+  object: NonNullable<ArtifactRelation["object"]>,
+  previous: readonly ArtifactRelation[],
+): boolean {
+  const prior = previous.find(
+    (candidate) => artifactRelationKey(candidate) === artifactRelationKey(artifact),
+  );
+  return Boolean(
+    prior?.archiveState === "captured" && prior.object && sameObjectReference(prior.object, object),
+  );
 }
 
 export class LocalCheckpointUnitOfWorkFactory implements CheckpointUnitOfWorkFactory {

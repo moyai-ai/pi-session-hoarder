@@ -172,6 +172,70 @@ describe("CheckpointService", () => {
     expect(await readdir(context.objectStore.temporaryRoot)).toEqual([]);
   }, 30_000);
 
+  it("replaces a captured object when the same sidecar relation changes content", async () => {
+    const context = await fixture();
+    const sidecar = join(context.directory, "changing-output.log");
+    await writeFile(sidecar, "first output");
+    await writeFile(
+      context.sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n${JSON.stringify(toolResult("artifact", sidecar))}\n`,
+    );
+    const first = required(await context.checkpoint.checkpoint(context.request));
+    const previous = first.record.artifacts[0]?.object;
+    expect(previous).toBeDefined();
+    await writeFile(sidecar, "replacement output");
+    await appendFile(
+      context.sessionFile,
+      `${JSON.stringify({ type: "custom", id: "changed-sidecar" })}\n`,
+    );
+
+    const second = required(await context.checkpoint.checkpoint(context.request));
+    const replacement = second.record.artifacts[0]?.object;
+
+    expect(replacement).toBeDefined();
+    expect(replacement?.digest).not.toBe(previous?.digest);
+    expect(second.record.artifacts[0]).toMatchObject({
+      sourceState: "present",
+      archiveState: "captured",
+      object: replacement,
+    });
+  });
+
+  it("preserves captured sidecar identity when its source later disappears", async () => {
+    const context = await fixture();
+    const sidecar = join(context.directory, "full-output.log");
+    await writeFile(sidecar, "complete output");
+    await writeFile(
+      context.sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n${JSON.stringify(toolResult("artifact", sidecar))}\n`,
+    );
+    const first = required(await context.checkpoint.checkpoint(context.request));
+    const captured = first.record.artifacts[0]?.object;
+    expect(captured).toBeDefined();
+    await rm(sidecar);
+    await writeFile(
+      context.sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "session" })}\n${JSON.stringify(toolResult("artifact", sidecar))}\n${JSON.stringify({ type: "custom", id: "changed" })}\n`,
+    );
+
+    const second = required(await context.checkpoint.checkpoint(context.request));
+
+    expect(second.record.artifacts[0]).toMatchObject({
+      sourceEntryId: "artifact",
+      sourceState: "missing",
+      archiveState: "captured",
+      object: captured,
+    });
+    expect(second.record.revision).toBe(first.record.revision + 1);
+
+    await writeFile(
+      context.sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: "compacted" })}\n`,
+    );
+    const compacted = required(await context.checkpoint.checkpoint(context.request));
+    expect(compacted.record.artifacts).toEqual([]);
+  });
+
   it("records missing sidecars without failing the session checkpoint", async () => {
     const context = await fixture();
     const missing = join(context.directory, "missing.log");
@@ -185,7 +249,8 @@ describe("CheckpointService", () => {
     expect(result.changed).toBe(true);
     expect(result.record.artifacts).toHaveLength(1);
     expect(result.record.artifacts[0]).toMatchObject({
-      state: "missing",
+      sourceState: "missing",
+      archiveState: "unavailable",
       sourceEntryId: "missing",
     });
   });

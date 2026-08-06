@@ -1,5 +1,5 @@
 import type { ArtifactRelation, SessionArchiveRecord, SessionIdentity } from "../domain/model.js";
-import { SessionArchive } from "../domain/model.js";
+import { artifactRelationKey, SessionArchive } from "../domain/model.js";
 import type {
   ArtifactDiscovery,
   CheckpointUnitOfWork,
@@ -62,7 +62,10 @@ export class CheckpointApplicationService {
       snapshot = await this.dependencies.snapshotter.capture(command.sessionFile, boundary, signal);
       const discovered = await this.dependencies.artifactDiscovery.discover(snapshot.path);
       const sessionObject = await putVerified(uow, snapshot.path, signal);
-      const artifacts = await captureArtifacts(uow, discovered, signal);
+      const artifacts = reconcileArtifacts(
+        await captureArtifacts(uow, discovered, signal),
+        archive.record?.artifacts ?? [],
+      );
 
       const timestamp = this.dependencies.clock.now().toISOString();
       const record = archive.recordCheckpoint({
@@ -131,18 +134,47 @@ async function captureArtifact(
     const captured = await objectPromise;
     return {
       ...structuredClone(artifact.relation),
-      state: "captured",
+      sourceState: "present",
+      archiveState: "captured",
       object: captured.object,
     };
   } catch (error) {
     if (signal?.aborted) throw error;
     return {
       ...structuredClone(artifact.relation),
-      state: "missing",
+      sourceState: "present",
+      archiveState: "unavailable",
       object: undefined,
       warning: `Unable to capture Bash full output: ${errorMessage(error)}`,
     };
   }
+}
+
+function reconcileArtifacts(
+  current: readonly ArtifactRelation[],
+  previous: readonly ArtifactRelation[],
+): ArtifactRelation[] {
+  const previouslyCaptured = new Map(
+    previous
+      .filter(
+        (
+          relation,
+        ): relation is ArtifactRelation & { object: NonNullable<ArtifactRelation["object"]> } =>
+          relation.archiveState === "captured" && relation.object !== undefined,
+      )
+      .map((relation) => [artifactRelationKey(relation), relation]),
+  );
+  return current.map((relation) => {
+    if (relation.archiveState === "captured") return structuredClone(relation);
+    const prior = previouslyCaptured.get(artifactRelationKey(relation));
+    return prior
+      ? {
+          ...structuredClone(relation),
+          archiveState: "captured",
+          object: structuredClone(prior.object),
+        }
+      : structuredClone(relation);
+  });
 }
 
 async function putVerified(

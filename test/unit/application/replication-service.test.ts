@@ -226,14 +226,16 @@ function archiveWith(
             kind: "pi-bash-full-output",
             sourceEntryId: "artifact-one",
             sourceField: "message.details.fullOutputPath",
-            state: "captured",
+            sourceState: "present",
+            archiveState: "captured",
             object: artifactObject,
           },
           {
             kind: "pi-bash-full-output",
             sourceEntryId: "artifact-two",
             sourceField: "message.details.fullOutputPath",
-            state: "captured",
+            sourceState: "present",
+            archiveState: "captured",
             object: artifactObject,
           },
         ]
@@ -333,6 +335,80 @@ describe("ReplicationApplicationService", () => {
     expect(result?.record.revision).toBe(2);
     expect(context.unitOfWorkFactory.objects.retrievals).toEqual([]);
     expect(context.unitOfWorkFactory.objects.puts).toEqual([]);
+  });
+
+  it("carries an exact trusted receipt for a preserved remote-only artifact into a new revision", async () => {
+    const context = setup();
+    const session = object("current-session");
+    const artifact = object("remote-only-artifact");
+    const archive = archiveWith(session, artifact);
+    archive.recordCheckpoint({
+      source: { size: session.logicalBytes, mtimeMs: 2, sha256: session.digest },
+      sessionObject: session,
+      artifacts: [
+        {
+          kind: "pi-bash-full-output",
+          sourceEntryId: "artifact-one",
+          sourceField: "message.details.fullOutputPath",
+          sourceState: "missing",
+          archiveState: "captured",
+          object: artifact,
+          warning: "source disappeared",
+        },
+      ],
+      capturedAt: "2026-08-05T12:01:00.000Z",
+      lastVerifiedAt: "2026-08-05T12:01:00.000Z",
+    });
+    context.archives.archive = archive;
+    context.source.add(session);
+    const receipts = [session, artifact].map(remoteReceipt);
+    for (const receipt of receipts) {
+      context.unitOfWorkFactory.objects.receipts.set(receipt.object.digest, receipt);
+    }
+    const replica = SessionReplica.create(command);
+    replica.recordVerifiedRevision({
+      revision: 1,
+      objects: receipts,
+      verifiedAt: "2026-08-05T12:30:00.000Z",
+    });
+    context.unitOfWorkFactory.replicas.stored = replica;
+    context.failpoints.arm(`source:verify:${artifact.digest}`);
+
+    const result = await context.service.sync(command);
+
+    expect(result?.record).toMatchObject({ revision: 2, objects: receipts });
+    expect(context.unitOfWorkFactory.objects.puts).toEqual([]);
+    expect(context.unitOfWorkFactory.objects.retrievals).toEqual([]);
+  });
+
+  it("uses the verified remote receipt as durability truth even when local bytes are corrupt", async () => {
+    const context = setup();
+    const session = object("trusted-over-corrupt-local");
+    const archive = archiveWith(session);
+    archive.recordCheckpoint({
+      source: { size: session.logicalBytes, mtimeMs: 2, sha256: session.digest },
+      sessionObject: session,
+      artifacts: [],
+      capturedAt: "2026-08-05T12:01:00.000Z",
+      lastVerifiedAt: "2026-08-05T12:01:00.000Z",
+    });
+    context.archives.archive = archive;
+    context.source.add(session);
+    context.source.invalid.add(session.digest);
+    const receipt = remoteReceipt(session);
+    context.unitOfWorkFactory.objects.receipts.set(session.digest, receipt);
+    const replica = SessionReplica.create(command);
+    replica.recordVerifiedRevision({
+      revision: 1,
+      objects: [receipt],
+      verifiedAt: "2026-08-05T12:30:00.000Z",
+    });
+    context.unitOfWorkFactory.replicas.stored = replica;
+
+    await expect(context.service.sync(command)).resolves.toMatchObject({
+      changed: true,
+      record: { revision: 2, objects: [receipt] },
+    });
   });
 
   it("does not let a stale unrelated durable receipt authorize another object", async () => {

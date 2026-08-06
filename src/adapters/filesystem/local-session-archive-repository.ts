@@ -55,6 +55,10 @@ export class LocalSessionArchiveRepository implements SessionArchiveRepository {
     this.pending.clear();
   }
 
+  async committedRecord(identity: SessionIdentity): Promise<SessionArchiveRecord | undefined> {
+    return this.readRecord(identity);
+  }
+
   async persist(archive: SessionArchive): Promise<void> {
     const record = archive.record;
     if (!record) throw new Error("Cannot persist an archive without a checkpoint revision.");

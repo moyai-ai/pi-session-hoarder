@@ -8,7 +8,7 @@ import type { SessionArchiveRecord } from "../../src/domain/model.js";
 function record(): SessionArchiveRecord {
   const digest = "a".repeat(64);
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     repositoryId: "repo",
     sessionId: "session",
     revision: 2,

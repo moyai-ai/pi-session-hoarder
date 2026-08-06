@@ -41,7 +41,7 @@ class FakeScheduler implements CoordinatorScheduler {
 function record(revision: number): SessionArchiveRecord {
   const digest = "a".repeat(64);
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     repositoryId: "repo",
     sessionId: "session",
     revision,

@@ -7,6 +7,7 @@ import type {
   CapturedSessionSnapshot,
   CheckpointUnitOfWork,
   CheckpointUnitOfWorkFactory,
+  DiscoveredArtifact,
   ObjectStore,
   SessionArchiveRepository,
   SessionSnapshotter,
@@ -198,7 +199,8 @@ describe("checkpoint application service", () => {
             kind: "pi-bash-full-output",
             sourceEntryId: "entry",
             sourceField: "message.details.fullOutputPath",
-            state: "captured",
+            sourceState: "present",
+            archiveState: "unavailable",
           },
         },
       ],
@@ -213,10 +215,151 @@ describe("checkpoint application service", () => {
         kind: "pi-bash-full-output",
         sourceEntryId: "entry",
         sourceField: "message.details.fullOutputPath",
-        state: "captured",
+        sourceState: "present",
+        archiveState: "captured",
         object: sidecar,
       },
     ]);
+  });
+
+  it.each(["missing", "invalid"] as const)(
+    "preserves a previously captured object when the current source is %s",
+    async (sourceState) => {
+      let discovered: DiscoveredArtifact[] = [
+        {
+          path: "sidecar",
+          relation: {
+            kind: "pi-bash-full-output" as const,
+            sourceEntryId: "entry",
+            sourceField: "message.details.fullOutputPath" as const,
+            sourceState: "present" as const,
+            archiveState: "unavailable" as const,
+          },
+        },
+      ];
+      const { service, unitOfWorkFactory, snapshotter } = setup({
+        discover: async () => discovered,
+      });
+      const sidecar = unitOfWorkFactory.objects.addPath("sidecar", "full output");
+      await service.checkpoint(command);
+      snapshotter.boundary = { size: 101, mtimeMs: 2 };
+      discovered = [
+        {
+          relation: {
+            kind: "pi-bash-full-output",
+            sourceEntryId: "entry",
+            sourceField: "message.details.fullOutputPath",
+            sourceState,
+            archiveState: "unavailable",
+            warning: "current source unavailable",
+          },
+        },
+      ];
+
+      const result = await service.checkpoint(command);
+
+      expect(result?.record.artifacts).toEqual([
+        {
+          kind: "pi-bash-full-output",
+          sourceEntryId: "entry",
+          sourceField: "message.details.fullOutputPath",
+          sourceState,
+          archiveState: "captured",
+          object: sidecar,
+          warning: "current source unavailable",
+        },
+      ]);
+    },
+  );
+
+  it("preserves a previous object after a transient capture failure", async () => {
+    let path = "sidecar";
+    const { service, unitOfWorkFactory, snapshotter } = setup({
+      discover: async () => [
+        {
+          path,
+          relation: {
+            kind: "pi-bash-full-output",
+            sourceEntryId: "entry",
+            sourceField: "message.details.fullOutputPath",
+            sourceState: "present",
+            archiveState: "unavailable",
+          },
+        },
+      ],
+    });
+    const sidecar = unitOfWorkFactory.objects.addPath("sidecar", "full output");
+    await service.checkpoint(command);
+    snapshotter.boundary = { size: 101, mtimeMs: 2 };
+    path = "transiently-unreadable";
+
+    const result = await service.checkpoint(command);
+
+    expect(result?.record.artifacts[0]).toMatchObject({
+      sourceState: "present",
+      archiveState: "captured",
+      object: sidecar,
+      warning: expect.stringContaining("Unable to capture Bash full output"),
+    });
+  });
+
+  it("prefers newly captured content for the same relation and drops removed relations", async () => {
+    let discovered = [
+      {
+        path: "old-sidecar",
+        relation: {
+          kind: "pi-bash-full-output" as const,
+          sourceEntryId: "entry",
+          sourceField: "message.details.fullOutputPath" as const,
+          sourceState: "present" as const,
+          archiveState: "unavailable" as const,
+        },
+      },
+    ];
+    const { service, unitOfWorkFactory, snapshotter } = setup({
+      discover: async () => discovered,
+    });
+    const oldSidecar = unitOfWorkFactory.objects.addPath("old-sidecar", "old output");
+    const newSidecar = unitOfWorkFactory.objects.addPath("new-sidecar", "new output");
+    await service.checkpoint(command);
+    snapshotter.boundary = { size: 101, mtimeMs: 2 };
+    discovered = [{ ...discovered[0]!, path: "new-sidecar" }];
+
+    const changed = await service.checkpoint(command);
+
+    expect(changed?.record.artifacts[0]?.object).toEqual(newSidecar);
+    expect(changed?.record.artifacts[0]?.object).not.toEqual(oldSidecar);
+    snapshotter.boundary = { size: 102, mtimeMs: 3 };
+    discovered = [];
+
+    const removed = await service.checkpoint(command);
+
+    expect(removed?.record.artifacts).toEqual([]);
+  });
+
+  it("does not invent an object for a never-captured missing relation", async () => {
+    const { service } = setup({
+      discover: async () => [
+        {
+          relation: {
+            kind: "pi-bash-full-output",
+            sourceEntryId: "entry",
+            sourceField: "message.details.fullOutputPath",
+            sourceState: "missing",
+            archiveState: "unavailable",
+            warning: "not found",
+          },
+        },
+      ],
+    });
+
+    const result = await service.checkpoint(command);
+
+    expect(result?.record.artifacts[0]).toMatchObject({
+      sourceState: "missing",
+      archiveState: "unavailable",
+    });
+    expect(result?.record.artifacts[0]).not.toHaveProperty("object");
   });
 
   it("rolls back aggregate publication on failure", async () => {

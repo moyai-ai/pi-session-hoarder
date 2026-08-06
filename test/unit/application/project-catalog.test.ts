@@ -19,7 +19,7 @@ function object(character: string) {
 
 function archive(): SessionArchiveRecord {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     repositoryId: "repo",
     sessionId: "session",
     revision: 3,
@@ -30,7 +30,8 @@ function archive(): SessionArchiveRecord {
         kind: "pi-bash-full-output",
         sourceEntryId: "entry",
         sourceField: "message.details.fullOutputPath",
-        state: "captured",
+        sourceState: "present",
+        archiveState: "captured",
         object: artifact,
         warning: "/private/path must never project",
       },
@@ -118,20 +119,32 @@ describe("ProjectCatalogApplicationService", () => {
     expect(text).not.toContain("secret operational detail");
     expect(text).not.toContain("worktreeRoot");
     expect(context.written()).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       revision: 3,
       git: { head: "c".repeat(40), branch: "feature", detached: false, dirty: true },
       sessionObject: { locations: [{ kind: "local-cas" }] },
-      artifacts: [{ state: "captured", object: { locations: [{ kind: "local-cas" }] } }],
+      artifacts: [
+        {
+          sourceState: "present",
+          archiveState: "captured",
+          object: { locations: [{ kind: "local-cas" }] },
+        },
+      ],
     });
   });
 
   it("serializes mixed verified local and globally configured S3 locations", async () => {
     const context = setup({ local: [session.digest], replica: replica() });
+    const remoteOnlyArchive = archive();
+    remoteOnlyArchive.artifacts = remoteOnlyArchive.artifacts.map((relation) => ({
+      ...relation,
+      sourceState: "missing",
+      warning: "/private/disappeared-sidecar",
+    }));
     await context.service.publish({
       cwd: "/worktree",
       trusted: true,
-      archive: archive(),
+      archive: remoteOnlyArchive,
       storageTarget: "s3",
       s3: target,
     });
@@ -142,11 +155,18 @@ describe("ProjectCatalogApplicationService", () => {
           { kind: "s3", targetId: "backup", bucket: "private-bucket", region: "us-east-1" },
         ],
       },
-      artifacts: [{ object: { locations: [{ kind: "s3", targetId: "backup" }] } }],
+      artifacts: [
+        {
+          sourceState: "missing",
+          archiveState: "captured",
+          object: { locations: [{ kind: "s3", targetId: "backup" }] },
+        },
+      ],
     });
     const text = JSON.stringify(context.written());
     expect(text).not.toContain("credentials.invalid");
     expect(text).not.toContain("private-profile");
+    expect(text).not.toContain("disappeared-sidecar");
   });
 
   it("requires trust, a worktree, local bytes, and matching S3 publication", async () => {

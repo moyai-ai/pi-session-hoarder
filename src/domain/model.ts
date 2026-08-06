@@ -33,15 +33,23 @@ export function sameObjectReference(left: ObjectReference, right: ObjectReferenc
   );
 }
 
-export type ArtifactRelationState = "captured" | "missing" | "invalid";
+export type ArtifactSourceState = "present" | "missing" | "invalid";
+export type ArtifactArchiveState = "captured" | "unavailable";
 
 export interface ArtifactRelation {
   kind: "pi-bash-full-output";
   sourceEntryId: string;
   sourceField: "message.details.fullOutputPath";
-  state: ArtifactRelationState;
+  sourceState: ArtifactSourceState;
+  archiveState: ArtifactArchiveState;
   object?: ObjectReference;
   warning?: string;
+}
+
+export function artifactRelationKey(
+  relation: Pick<ArtifactRelation, "kind" | "sourceEntryId" | "sourceField">,
+): string {
+  return `${relation.kind}\0${relation.sourceEntryId}\0${relation.sourceField}`;
 }
 
 export interface SourceSnapshot {
@@ -68,7 +76,7 @@ export interface CheckpointError {
 }
 
 export interface SessionArchiveRecord extends CheckpointRevision, SessionIdentity {
-  schemaVersion: 2;
+  schemaVersion: 3;
   lastError?: CheckpointError;
 }
 
@@ -129,7 +137,7 @@ export class SessionArchive {
 
   recordCheckpoint(input: RecordCheckpointInput): SessionArchiveRecord {
     const record: SessionArchiveRecord = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       ...this.identity,
       revision: this.revision + 1,
       source: structuredClone(input.source),
@@ -176,11 +184,11 @@ function assertRecordInvariants(record: SessionArchiveRecord): void {
   }
   assertRecordTimestamps(record);
   for (const artifact of record.artifacts) {
-    if (artifact.state === "captured" && !artifact.object) {
+    if (artifact.archiveState === "captured" && !artifact.object) {
       throw new Error("A captured artifact relation must reference an object.");
     }
-    if (artifact.state !== "captured" && artifact.object) {
-      throw new Error("A missing or invalid artifact relation cannot reference an object.");
+    if (artifact.archiveState === "unavailable" && artifact.object) {
+      throw new Error("An unavailable artifact relation cannot reference an object.");
     }
   }
 }

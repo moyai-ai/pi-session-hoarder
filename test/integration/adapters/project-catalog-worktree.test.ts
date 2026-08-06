@@ -22,7 +22,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 
 function catalog(revision = 1): ProjectSessionCatalog {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     repositoryId: "repo",
     sessionId: "session",
     revision,

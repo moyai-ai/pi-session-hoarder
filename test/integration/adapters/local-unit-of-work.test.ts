@@ -100,6 +100,118 @@ describe("LocalCheckpointUnitOfWork", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("allows an exact previously captured artifact to remain remote-only", async () => {
+    const { root, objects, source, stored } = await fixture();
+    const sidecar = join(root, "sidecar.log");
+    await writeFile(sidecar, "archived output");
+    const captured = await objects.putFile(sidecar);
+    const initial = SessionArchive.create({ repositoryId: "repo-id", sessionId: "session-id" });
+    initial.recordCheckpoint({
+      source: { size: 15, mtimeMs: 2, sha256: stored.object.digest },
+      sessionObject: stored.object,
+      artifacts: [
+        {
+          kind: "pi-bash-full-output",
+          sourceEntryId: "artifact-entry",
+          sourceField: "message.details.fullOutputPath",
+          sourceState: "present",
+          archiveState: "captured",
+          object: captured.object,
+        },
+      ],
+      capturedAt: "2026-08-03T00:00:01.000Z",
+      lastVerifiedAt: "2026-08-03T00:00:01.000Z",
+    });
+    const initialUow = new LocalCheckpointUnitOfWork(
+      new LocalSessionArchiveRepository(root),
+      objects,
+    );
+    initialUow.archives.add(initial);
+    await initialUow.commit();
+    await rm(captured.absolutePath);
+
+    const repository = new LocalSessionArchiveRepository(root);
+    const loaded = await repository.get(initial.identity);
+    loaded!.recordCheckpoint({
+      source: { size: 16, mtimeMs: 3, sha256: stored.object.digest },
+      sessionObject: stored.object,
+      artifacts: [
+        {
+          kind: "pi-bash-full-output",
+          sourceEntryId: "artifact-entry",
+          sourceField: "message.details.fullOutputPath",
+          sourceState: "missing",
+          archiveState: "captured",
+          object: captured.object,
+          warning: "source disappeared",
+        },
+      ],
+      capturedAt: "2026-08-03T00:00:02.000Z",
+      lastVerifiedAt: "2026-08-03T00:00:02.000Z",
+    });
+    const uow = new LocalCheckpointUnitOfWork(repository, objects);
+    uow.archives.add(loaded!);
+
+    await expect(uow.commit()).resolves.toBeUndefined();
+    expect(await objects.has(captured.object.digest)).toBe(false);
+    expect(await objects.has(stored.object.digest)).toBe(true);
+    expect(await readFile(source, "utf8")).toBe("session bytes\n");
+  });
+
+  it("does not authorize a missing object through an unrelated prior relation", async () => {
+    const { root, objects, stored } = await fixture();
+    const sidecar = join(root, "sidecar.log");
+    await writeFile(sidecar, "archived output");
+    const captured = await objects.putFile(sidecar);
+    const initial = SessionArchive.create({ repositoryId: "repo-id", sessionId: "session-id" });
+    initial.recordCheckpoint({
+      source: { size: 15, mtimeMs: 2, sha256: stored.object.digest },
+      sessionObject: stored.object,
+      artifacts: [
+        {
+          kind: "pi-bash-full-output",
+          sourceEntryId: "old-entry",
+          sourceField: "message.details.fullOutputPath",
+          sourceState: "present",
+          archiveState: "captured",
+          object: captured.object,
+        },
+      ],
+      capturedAt: "2026-08-03T00:00:01.000Z",
+      lastVerifiedAt: "2026-08-03T00:00:01.000Z",
+    });
+    const initialUow = new LocalCheckpointUnitOfWork(
+      new LocalSessionArchiveRepository(root),
+      objects,
+    );
+    initialUow.archives.add(initial);
+    await initialUow.commit();
+    await rm(captured.absolutePath);
+
+    const repository = new LocalSessionArchiveRepository(root);
+    const loaded = await repository.get(initial.identity);
+    loaded!.recordCheckpoint({
+      source: { size: 16, mtimeMs: 3, sha256: stored.object.digest },
+      sessionObject: stored.object,
+      artifacts: [
+        {
+          kind: "pi-bash-full-output",
+          sourceEntryId: "new-entry",
+          sourceField: "message.details.fullOutputPath",
+          sourceState: "missing",
+          archiveState: "captured",
+          object: captured.object,
+        },
+      ],
+      capturedAt: "2026-08-03T00:00:02.000Z",
+      lastVerifiedAt: "2026-08-03T00:00:02.000Z",
+    });
+    const uow = new LocalCheckpointUnitOfWork(repository, objects);
+    uow.archives.add(loaded!);
+
+    await expect(uow.commit()).rejects.toThrow("missing CAS object");
+  });
+
   it("rejects stale concurrent aggregate revisions", async () => {
     const { root, objects, stored } = await fixture();
     const first = archiveFor(stored.object);
@@ -183,57 +295,31 @@ describe("LocalCheckpointUnitOfWork", () => {
     await expect(repository.get(identity)).rejects.toThrow(error);
   });
 
-  it("loads schema-v1 catalogs without rewriting them and writes schema v2 on the next commit", async () => {
-    const { root, objects, stored } = await fixture();
+  it("rejects illegal schema-v3 artifact state/object combinations", async () => {
+    const { root, stored } = await fixture();
     const repository = new LocalSessionArchiveRepository(root);
     const identity = { repositoryId: "repo-id", sessionId: "session-id" };
     const path = repository.recordPath(identity);
     const current = archiveFor(stored.object).record!;
-    const legacyRecord = {
-      ...current,
-      schemaVersion: 1,
-      sessionObject: {
-        ...current.sessionObject,
-        relativePath: `objects/sha256/${current.sessionObject.digest}.gz`,
-      },
-      artifacts: [
-        {
-          kind: "pi-bash-full-output",
-          sourceEntryId: "legacy-artifact",
-          sourceField: "message.details.fullOutputPath",
-          state: "captured",
-          object: {
-            ...current.sessionObject,
-            relativePath: `objects/sha256/${current.sessionObject.digest}.gz`,
-          },
-        },
-      ],
-    };
-    const legacyText = `${JSON.stringify(legacyRecord, null, 2)}\n`;
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, legacyText);
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...current,
+        artifacts: [
+          {
+            kind: "pi-bash-full-output",
+            sourceEntryId: "illegal",
+            sourceField: "message.details.fullOutputPath",
+            sourceState: "missing",
+            archiveState: "unavailable",
+            object: stored.object,
+          },
+        ],
+      }),
+    );
 
-    const loaded = await repository.get(identity);
-
-    expect(loaded?.record).toMatchObject({ schemaVersion: 2, revision: 1 });
-    expect(loaded?.record?.sessionObject).not.toHaveProperty("relativePath");
-    expect(loaded?.record?.artifacts[0]?.object).not.toHaveProperty("relativePath");
-    expect(await readFile(path, "utf8")).toBe(legacyText);
-
-    loaded!.recordCheckpoint({
-      source: { size: 20, mtimeMs: 2, sha256: stored.object.digest },
-      sessionObject: stored.object,
-      artifacts: loaded!.record!.artifacts,
-      capturedAt: "2026-08-03T00:00:01.000Z",
-      lastVerifiedAt: "2026-08-03T00:00:01.000Z",
-    });
-    const uow = new LocalCheckpointUnitOfWork(repository, objects);
-    uow.archives.add(loaded!);
-    await uow.commit();
-
-    const rewritten = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-    expect(rewritten).toMatchObject({ schemaVersion: 2, revision: 2 });
-    expect(JSON.stringify(rewritten)).not.toContain("relativePath");
+    await expect(repository.get(identity)).rejects.toThrow("Invalid session archive record");
   });
 
   it("validates persisted aggregate records before rehydrating the domain", async () => {
@@ -242,19 +328,21 @@ describe("LocalCheckpointUnitOfWork", () => {
     const identity = { repositoryId: "repo-id", sessionId: "session-id" };
     const path = repository.recordPath(identity);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify({ schemaVersion: 1 }));
+    await writeFile(path, JSON.stringify({ schemaVersion: 3 }));
 
     await expect(repository.get(identity)).rejects.toThrow("Invalid session archive record");
   });
 
-  it("rejects unsupported catalog schema versions explicitly", async () => {
+  it.each([1, 2, 99])("rejects unsupported catalog schema version %s", async (schemaVersion) => {
     const { root } = await fixture();
     const repository = new LocalSessionArchiveRepository(root);
     const identity = { repositoryId: "repo-id", sessionId: "session-id" };
     const path = repository.recordPath(identity);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify({ schemaVersion: 99 }));
+    await writeFile(path, JSON.stringify({ schemaVersion }));
 
-    await expect(repository.get(identity)).rejects.toThrow("unsupported schema version 99");
+    await expect(repository.get(identity)).rejects.toThrow(
+      `unsupported schema version ${schemaVersion}`,
+    );
   });
 });

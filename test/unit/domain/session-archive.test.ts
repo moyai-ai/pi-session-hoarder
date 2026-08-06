@@ -20,7 +20,7 @@ function object(hash = digest): ObjectReference {
 
 function record(): SessionArchiveRecord {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     repositoryId: "repo",
     sessionId: "session",
     revision: 1,
@@ -88,13 +88,57 @@ describe("SessionArchive aggregate", () => {
             kind: "pi-bash-full-output",
             sourceEntryId: "entry",
             sourceField: "message.details.fullOutputPath",
-            state: "captured",
+            sourceState: "present",
+            archiveState: "captured",
           },
         ],
         capturedAt: "2026-08-03T00:00:00.000Z",
         lastVerifiedAt: "2026-08-03T00:00:00.000Z",
       }),
     ).toThrow("must reference an object");
+  });
+
+  it("allows captured objects to coexist with unavailable current sources", () => {
+    const archive = SessionArchive.create({ repositoryId: "repo", sessionId: "session" });
+    const captured = object("b".repeat(64));
+
+    const next = archive.recordCheckpoint({
+      source: { size: 10, mtimeMs: 1, sha256: digest },
+      sessionObject: object(),
+      artifacts: [
+        {
+          kind: "pi-bash-full-output",
+          sourceEntryId: "entry",
+          sourceField: "message.details.fullOutputPath",
+          sourceState: "missing",
+          archiveState: "captured",
+          object: captured,
+        },
+      ],
+      capturedAt: "2026-08-03T00:00:00.000Z",
+      lastVerifiedAt: "2026-08-03T00:00:00.000Z",
+    });
+
+    expect(archive.referencedObjects()).toContainEqual(captured);
+    expect(next.artifacts[0]).toMatchObject({ sourceState: "missing", archiveState: "captured" });
+  });
+
+  it("forbids unavailable artifact relations from referencing an object", () => {
+    expect(() =>
+      SessionArchive.rehydrate({
+        ...record(),
+        artifacts: [
+          {
+            kind: "pi-bash-full-output",
+            sourceEntryId: "entry",
+            sourceField: "message.details.fullOutputPath",
+            sourceState: "invalid",
+            archiveState: "unavailable",
+            object: object("b".repeat(64)),
+          },
+        ],
+      }),
+    ).toThrow("unavailable artifact relation");
   });
 
   it.each([
