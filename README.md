@@ -10,18 +10,16 @@
 
 <p align="center"><strong>Verified local archives for your Pi sessions.</strong></p>
 
-Pi Session Hoarder is a zero-configuration [Pi](https://github.com/earendil-works/pi-mono) extension that continuously archives your active sessions into verified, content-addressed local storage.
+**Pi Session Hoarder** (**Hoarder**) is a zero-configuration [Pi](https://github.com/earendil-works/pi-mono) extension that automatically archives every persisted Pi session into verified local storage. Hoarder gives you a durable history of your Pi work without changing how Pi writes or manages sessions:
 
-It gives developers a durable local history of their Pi work without changing how Pi writes or manages sessions:
+- **Automatic checkpoints** — Hoarder archives the session in the background as it evolves.
+- **Crash recovery** — when a session restarts, Hoarder detects missed work and checkpoints it.
+- **Complete Bash output** — Hoarder preserves the full Bash output files Pi references from a session (**sidecars**), so long command output survives even when the chat shows only a truncated version.
+- **Verified storage** — Hoarder names every archived object by the SHA-256 hash of its original bytes, so the archive can prove its contents are intact.
+- **Efficient storage** — Hoarder stores identical content once and compresses everything with gzip.
+- **Safe by design** — Hoarder never replaces, truncates, or deletes Pi's own session files.
 
-- **Automatic checkpoints** — sessions are archived in the background as they evolve.
-- **Crash recovery** — missed work is detected and checkpointed when the session starts again.
-- **Complete Bash output capture** — supported full-output sidecar files are preserved alongside the session that produced them.
-- **Verified storage** — every object is identified by the SHA-256 hash of its original bytes.
-- **Efficient storage** — identical content is stored once and compressed with gzip.
-- **Safe by design** — Hoarder never replaces, truncates, or deletes Pi's source session files.
-
-Pi's normal JSONL session remains the active write-ahead journal. Hoarder creates an additional local archive; it does not take over Pi persistence.
+Pi's JSONL session file remains the live journal that Pi itself writes. Hoarder adds a second, independent copy: it streams each checkpoint into `~/.pi/agent/session-hoarder/` and can optionally replicate the same objects to S3. Hoarder never takes over Pi persistence.
 
 ## 1. Install
 
@@ -31,19 +29,13 @@ Install the npm release with Pi:
 pi install npm:@moyai/pi-session-hoarder
 ```
 
-To install the latest source directly from GitHub instead:
+Restart Pi, or run `/reload` in your current session, to activate Hoarder. From then on it works automatically whenever a persisted session starts—no configuration, no separate background service.
 
-```bash
-pi install https://github.com/moyai-ai/pi-session-hoarder
-```
+> Pi extensions run with your system permissions. Review third-party extension source before you install it.
 
-Restart Pi after installation, or run `/reload` in your current Pi session to activate Hoarder immediately. Hoarder begins working automatically when a persisted session starts—there is no required configuration or background service.
+## 2. Using Hoarder
 
-> Pi extensions run with your system permissions. Review third-party extension source before installing it.
-
-## 2. Using Session Hoarder
-
-Most of the time, no interaction is necessary. A compact footer indicator shows the current state:
+Most of the time you won't need to touch Hoarder. A compact footer indicator shows its state:
 
 | Indicator | Meaning |
 | --- | --- |
@@ -53,31 +45,28 @@ Most of the time, no interaction is necessary. A compact footer indicator shows 
 | `!hoard` | Initialization or the last checkpoint failed |
 | `○hoard off` | Hoarder is disabled or the session is not persisted |
 
-The following commands are available:
+Hoarder adds the following commands:
 
-- `/hoarder status` reports the active session, selected target, catalog revisions, archive sizes, captured artifact count, and last error when applicable.
-- `/hoarder sync` requests an immediate checkpoint instead of waiting for the normal debounce interval.
-- `/hoarder git enable` enables PR-safe catalog publication for a trusted Git worktree. Hoarder writes the projection but never stages or commits it.
-- `/hoarder storage local` selects local durability without making S3 requests or downloading history.
-- `/hoarder storage s3` selects a configured S3 target. When none exists and UI is available, it opens a credential-safe global setup wizard with an optional real upload verification.
-- `/hoarder prune` previews and removes only local CAS objects backed by durable verified receipts for the selected S3 target. It never deletes source sessions, catalogs, receipts, configuration, or remote objects.
+- `/hoarder status` reports the active session, selected storage target, catalog revisions, archive sizes, captured artifact count, and the last error if one occurred.
+- `/hoarder sync` checkpoints immediately instead of waiting for the normal update delay.
+- `/hoarder git enable` turns on Git-tracked session catalogs for a trusted worktree ([section 4.3](#43-git-tracked-project-catalogs)).
+- `/hoarder storage local` and `/hoarder storage s3` select the storage target ([section 4](#4-storage)).
+- `/hoarder prune` frees local disk space that S3 already holds safely ([section 4.2.4](#424-pruning)).
 
-## 3. What is archived
+## 3. What Hoarder archives
 
 For each persisted Pi session, Hoarder captures:
 
-1. The active Pi JSONL session file at a stable boundary.
-2. Full Bash output files explicitly referenced by Pi at `message.details.fullOutputPath`.
+- The Pi JSONL session file, taken at a stable boundary.
+- The full Bash output sidecars that Pi references at `message.details.fullOutputPath`.
 
-Sidecar discovery is intentionally allowlisted. Hoarder does not follow arbitrary paths from model messages or tool output, recursively scan directories, or archive project files.
-
-Missing Bash sidecars are recorded as warnings and do not prevent the session itself from being archived.
+Hoarder follows only that explicit allowlist: it never follows arbitrary paths from model messages or tool output, never scans directories recursively, and never archives project files. If a sidecar is missing, Hoarder records a warning and archives the session anyway.
 
 ## 4. Storage
 
 ### 4.1 Local storage
 
-Local storage is the zero-configuration default and remains the mandatory checkpoint write path. The archive is stored at:
+Local storage is the zero-configuration default, and it remains the first write path even when S3 is enabled: every checkpoint lands in the local archive first.
 
 ```text
 ~/.pi/agent/session-hoarder/
@@ -86,103 +75,86 @@ Local storage is the zero-configuration default and remains the mandatory checkp
   tmp/
 ```
 
-Session and sidecar bytes are streamed through SHA-256 and gzip. The SHA-256 identity is calculated from the original, uncompressed content; gzip is only the storage encoding. Catalog revisions are published atomically only after every referenced object exists.
+The archive is content-addressed: Hoarder streams session and sidecar bytes through SHA-256 and gzip, names each object by the hash of its original uncompressed bytes, and stores identical content only once. A **catalog** is a small JSON file that lists the objects making up one archived session; Hoarder publishes each catalog revision atomically, and only after every object it references exists.
 
-Repository identities keep sessions from different projects separate. Git repositories use their normalized `origin` URL when available, then their repository root; directories outside Git use their canonical working path.
+Catalogs for sessions from different projects remain separate. Hoarder keys each archive by repository identity: a Git repository's normalized `origin` URL when available, otherwise its repository root; directories outside Git use their canonical working path.
 
-The archive uses ordinary JSON catalogs and gzip files rather than a proprietary format. There is not yet a built-in restore command, but each catalog identifies its session object by `sessionObject.digest`. Local object paths are derived from that digest:
-
-```text
-objects/sha256/<digest>.gz
-```
-
-You can decode an object with standard gzip tooling:
+Hoarder has no restore command yet, but the local archive needs no special tooling to read. Each catalog names its session object in `sessionObject.digest`, the object lives at `objects/sha256/<digest>.gz`, and standard gzip decodes it:
 
 ```bash
 gzip -dc ~/.pi/agent/session-hoarder/objects/sha256/<digest>.gz > recovered-session.jsonl
 ```
 
-Archive catalogs store portable logical object references without machine-specific paths. Catalog encoding and accepted schema versions are defined by the current source and validated strictly when read.
+Catalogs store portable object references—never machine-specific paths—and Hoarder validates their schema strictly when it reads them.
 
 ### 4.2 S3 storage
 
-S3-compatible durability is selected with:
+S3 is optional replication, not a replacement: the local archive stays the checkpoint and staging path, and Hoarder copies verified gzip objects to your bucket in the background. Select it with:
 
 ```text
 /hoarder storage s3
 ```
 
-#### 4.2.1 Replication and target switching
+#### 4.2.1 Setup wizard
 
-The local CAS remains the checkpoint and staging path. Verified gzip objects are replicated to the configured S3 target in the background.
+When no valid target exists and a UI is available, the command opens a short setup wizard. The wizard:
 
-Switching back with `/hoarder storage local` synchronously cancels queued or active replication before persisting the local selection. It:
+- Asks for the bucket, region, and credential source. A target name and object prefix are optional; custom endpoints and path-style addressing appear only for S3-compatible services such as MinIO or RustFS.
+- Shows a sanitized summary of the target and the exact upload size of the current session, and warns that private session and sidecar bytes will leave your machine.
+- Offers two ways to finish: test-upload and verify the current session objects before saving the target, or save without a test and let the first normal sync verify them.
 
-- starts no additional S3 requests;
-- downloads no remote-only history;
-- deletes no remote objects; and
-- does not rewrite committed project catalogs.
+A successful test upload is not repeated work: the first sync afterward re-verifies the remote bytes under the selected target identity but does not upload them again.
 
-Selecting S3 again resumes from the newest committed local archive state.
+#### 4.2.2 Credentials and privacy
 
-#### 4.2.2 Pruning
+Routing is configured globally. Credentials resolve through the standard AWS credential chain; Hoarder never stores them in project configuration or catalogs, and project content cannot redirect uploads.
 
-`/hoarder prune` is available only while S3 is selected and removes only exact durable verified receipt-backed local CAS objects after confirmation when UI is available. Prune does not perform a restore round trip first; removed objects become remote-only, and there is currently no in-product restore command.
+The wizard never asks for access keys, secrets, session tokens, or web-identity tokens. Supported credential sources include:
 
-#### 4.2.3 Setup wizard
+- **IAM user keys** — run `aws configure --profile session-hoarder` first, then select that profile; or export the standard AWS environment variables.
+- **IAM Identity Center** — run `aws sso login --profile company-sso`, then select `company-sso`.
+- **Workload roles or the default profile** — no profile entry is needed.
 
-When no valid target exists, `/hoarder storage s3` opens a short interactive wizard in TUI/RPC modes.
+Uploads always use the bucket's encryption settings; Hoarder never sends a per-request encryption override. In headless print/JSON modes, the command asks nothing and makes no S3 requests—it prints the global configuration path instead.
 
-The common AWS path asks for the bucket, region, and credential source. Target naming and object-prefix settings are optional advanced fields. Custom endpoints and path-style addressing are requested only for S3-compatible services such as MinIO or RustFS. Uploads always use the bucket's encryption settings and never send a per-request encryption override.
+#### 4.2.3 Replication and target switching
 
-The wizard then shows a sanitized target and exact current-session upload-size preview and offers either:
+`/hoarder storage local` switches back safely. It cancels queued or active replication before saving the selection, and it touches nothing else:
 
-- upload and verify the current content-addressed session objects before atomically saving/selecting the target; or
-- save/select the target without a test and let normal synchronization perform the first verification.
+- no new S3 requests;
+- no downloads of remote-only history;
+- no remote deletions; and
+- no rewrites of committed project catalogs.
 
-Draft verification receipts are isolated from the final selected target until the global configuration write succeeds. The first normal synchronization after a successful upload test therefore re-verifies the immutable remote bytes under the selected target identity, but it does not upload them again.
+Selecting S3 again resumes from the newest committed local state.
 
-#### 4.2.4 Credentials and privacy
+#### 4.2.4 Pruning
 
-S3 credentials and routing are configured globally. Credentials use the AWS SDK credential chain; project configuration and catalogs never contain credentials and cannot redirect uploads.
+`/hoarder prune` frees local disk space once S3 holds the data. It is available only while S3 is selected. After a preview and, when UI is available, your confirmation, it deletes exactly those local objects whose upload carries a durable, verified receipt—never source sessions, catalogs, receipts, configuration, or remote objects.
 
-The upload choice explicitly warns that private session and allowlisted Bash sidecar bytes will leave the machine. The wizard never requests access keys, secret keys, session tokens, or web-identity tokens.
-
-Credential sources work as follows:
-
-- **IAM-user access keys:** They remain supported through the standard AWS credential chain. Configure them first with `aws configure --profile session-hoarder` and select that named profile, or expose them through the standard AWS environment variables.
-- **IAM Identity Center:** Run `aws sso login --profile company-sso` and select `company-sso`.
-- **Workload roles and the default AWS profile:** No profile entry is required.
-
-In headless print/JSON modes, the command performs no prompts and no S3 requests, and instead reports the exact global configuration path.
+Prune trusts those exact receipts rather than re-downloading objects to check them. Pruned objects therefore become remote-only; with no in-product restore command yet, you must fetch and decompress them yourself if you need them back.
 
 ### 4.3 Git-tracked project catalogs
 
-For a trusted Git worktree, enable direct source provenance explicitly:
+A trusted Git worktree can carry provenance for the sessions that produced it. Enable this explicitly:
 
 ```text
 /hoarder git enable
 ```
 
-After a verified local checkpoint—or after matching S3 publication when S3 is selected—Hoarder atomically writes:
+After each verified local checkpoint—or after the matching S3 publication when S3 is selected—Hoarder atomically writes a catalog into the worktree:
 
 ```text
 .pi/session-hoarder/catalog/<session-id>.json
 ```
 
-The projection contains logical object identities, sizes, allowlisted artifact relations, structural Git context, and verified local/S3 location descriptors. It excludes session content, prompts, absolute paths, credentials, configured endpoints, credential profiles, and private operational errors.
+The catalog contains logical object identities, sizes, allowlisted artifact relations, structural Git context, and location descriptors for the verified local and S3 copies. It excludes session content, prompts, absolute paths, credentials, endpoints, credential profiles, and operational error details.
 
-The file appears as an ordinary worktree change. Hoarder never stages, commits, amends, installs hooks, or changes the Git index. Commit the projection with the related source changes when you want the source commit or pull request to retain direct provenance to that session revision.
+The file appears as an ordinary worktree change, and Hoarder never stages, commits, amends, installs hooks, or touches the Git index. Commit the catalog alongside the related source changes when you want a commit or pull request to point at the exact session revision that produced it.
 
 ## 5. Configuration
 
-Configuration is optional. Global settings are read from:
-
-```text
-~/.pi/agent/session-hoarder.json
-```
-
-If `PI_CODING_AGENT_DIR` is set, the global configuration file is read from that Pi agent directory instead.
+Configuration is optional. Hoarder reads global settings from `~/.pi/agent/session-hoarder.json`, or from the Pi agent directory when `PI_CODING_AGENT_DIR` is set.
 
 ```json
 {
@@ -195,15 +167,17 @@ If `PI_CODING_AGENT_DIR` is set, the global configuration file is read from that
 }
 ```
 
+The following settings are available:
+
 | Setting | Description |
 | --- | --- |
-| `enabled` | Enables or disables collection |
-| `debounceMs` | Delay used to coalesce normal session updates |
-| `shutdownTimeoutMs` | Maximum time allowed for the final shutdown checkpoint |
-| `retrievalConfirmationBytes` | Reserved confirmation threshold for the implemented retrieval service; no user command currently invokes retrieval |
-| `storageRoot` | Location of the local content-addressed archive |
-| `storageTarget` | Selected durability target: `local` or `s3` |
-| `s3` | Global-only named S3 target settings used when `storageTarget` is `s3` |
+| `enabled` | Master switch for collection |
+| `debounceMs` | Delay that coalesces session updates into one checkpoint |
+| `shutdownTimeoutMs` | Time limit for the final shutdown checkpoint |
+| `retrievalConfirmationBytes` | Reserved confirmation threshold for the implemented retrieval service; no command uses retrieval yet |
+| `storageRoot` | Location of the local archive |
+| `storageTarget` | Active storage target: `local` or `s3` |
+| `s3` | Named S3 target settings (global configuration only) |
 
 A global S3 target uses this shape:
 
@@ -220,19 +194,22 @@ A global S3 target uses this shape:
 }
 ```
 
-Optional S3 fields include `endpoint` and `profile`. Credentials are resolved externally and are never stored in Session Hoarder configuration. Per-request encryption overrides are not supported; configure encryption on the bucket.
+`endpoint` and `profile` are optional S3 fields. Credentials resolve outside Hoarder—through the AWS credential chain—and never appear in Hoarder configuration. Hoarder does not support per-request encryption overrides; configure encryption on the bucket.
 
-Trusted projects may also provide `.pi/session-hoarder.json`, but project configuration may only change `enabled`, `debounceMs`, `shutdownTimeoutMs`, and `gitCatalogEnabled`. A project cannot redirect the archive location or remote target, and configuration from untrusted projects is ignored.
+A trusted project may add its own `.pi/session-hoarder.json`, but project configuration can change only `enabled`, `debounceMs`, `shutdownTimeoutMs`, and `gitCatalogEnabled`. A project can never redirect the archive location or the remote target, and Hoarder ignores configuration from untrusted projects entirely.
 
 Invalid configuration disables collection and reports an error instead of crashing Pi.
 
 ## 6. Privacy and current scope
 
-Pi sessions can contain prompts, model responses, source code, file paths, embedded images, tool results, and secrets. Bash full-output sidecars may contain substantially more data than the truncated output shown in the conversation.
+Pi sessions can contain prompts, model responses, source code, file paths, embedded images, tool results, and secrets—and Bash sidecars may hold far more than the truncated output shown in the conversation. Treat the archive directory as sensitive data and protect it accordingly.
 
-Treat the archive directory as sensitive data and protect it accordingly.
+The current release also has deliberate limits:
 
-Remote durability is opt-in and requires a globally configured S3-compatible target. R1 has no automatic retention policy, never deletes source session JSONL or remote objects, and does not provide a general automated restore command. Local cache pruning is always explicit and receipt-gated.
+- Remote replication is opt-in and requires a globally configured S3-compatible target.
+- Hoarder ships no automatic retention policy and never deletes source session files or remote objects.
+- Hoarder ships no automated restore command; locally available objects can be recovered with the standard tooling shown in [section 4.1](#41-local-storage).
+- Pruning the local archive is always explicit and always backed by verified upload receipts.
 
 ## 7. Contributing
 
@@ -249,8 +226,8 @@ npm run analyze:audit -- --base origin/main
 npm run check
 ```
 
-`npm run format` applies Oxfmt to TypeScript, JavaScript, JSON, and JSONC project files. `npm run lint` runs Oxlint with correctness, suspicious-code, performance, TypeScript, import, Node, promise, Unicorn, and Vitest checks. `npm run check` first verifies formatting and linting, then typechecks the project, runs the full test suite with Istanbul coverage, enforces coverage thresholds, and runs Fallow's type-aware dead-code, duplication, architecture, and maintainability gates. The current minimum coverage is 85% statements, 75% branches, 90% functions, and 90% lines.
+`npm run format` applies Oxfmt to TypeScript, JavaScript, JSON, and JSONC files. `npm run lint` runs Oxlint with correctness, suspicious-code, performance, TypeScript, import, Node, promise, Unicorn, and Vitest rule sets. `npm run check` runs the full gate in order: format verification, lint, typecheck, the test suite with Istanbul coverage, coverage thresholds, then Fallow's type-aware dead-code, duplication, architecture, and maintainability analysis. Coverage must stay at or above 85% statements, 75% branches, 90% functions, and 90% lines.
 
-Reusable adapter behavior lives under `test/contracts/`, while deterministic interruption tests use failpoints under `test/support/`. New object-store and Unit of Work adapters should pass the same contracts as the local filesystem implementations.
+Reusable adapter behavior lives under `test/contracts/`, and deterministic interruption tests use failpoints under `test/support/`. New object-store and Unit of Work adapters should pass the same contracts as the local filesystem implementations.
 
-Runtime code uses TypeScript, Node built-ins, and Pi-provided APIs. Please include tests with behavioral changes and keep dependencies flowing through the existing `domain`, `application`, `adapters`, and `entrypoints` layers. The project is licensed under Apache-2.0.
+Runtime code uses TypeScript, Node built-ins, and Pi-provided APIs. Include tests with behavioral changes, and keep dependencies flowing through the existing `domain`, `application`, `adapters`, and `entrypoints` layers. Pi Session Hoarder is licensed under Apache-2.0.
