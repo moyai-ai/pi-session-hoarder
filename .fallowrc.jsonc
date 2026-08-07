@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
-  "entry": ["src/index.ts", "scripts/run-s3-tests.mjs", "vitest.s3.config.ts"],
+  "entry": ["src/index.ts", "vitest.s3.config.ts"],
   "typeAware": {
     "enabled": true,
     "projects": ["tsconfig.json"],
@@ -19,7 +19,7 @@
       { "name": "tests", "patterns": ["test/**"] },
       {
         "name": "tooling",
-        "patterns": ["vitest.config.ts", "vitest.s3.config.ts", "scripts/**"],
+        "patterns": ["vitest.config.ts", "vitest.s3.config.ts"],
       },
     ],
     "rules": [

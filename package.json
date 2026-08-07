@@ -23,17 +23,17 @@
     "access": "public"
   },
   "scripts": {
-    "lint": "oxlint --deny-warnings --report-unused-disable-directives src test scripts scratch *.ts",
-    "lint:fix": "oxlint --fix src test scripts scratch *.ts",
-    "format": "oxfmt --write src test scripts scratch .fallowrc.jsonc .oxlintrc.json .oxfmtrc.json package.json tsconfig.json vitest.config.ts vitest.s3.config.ts",
-    "format:check": "oxfmt --check src test scripts scratch .fallowrc.jsonc .oxlintrc.json .oxfmtrc.json package.json tsconfig.json vitest.config.ts vitest.s3.config.ts",
+    "lint": "oxlint --deny-warnings --report-unused-disable-directives src test *.ts",
+    "lint:fix": "oxlint --fix src test *.ts",
+    "format": "oxfmt --write src test .fallowrc.jsonc .oxlintrc.json .oxfmtrc.json package.json tsconfig.json vitest.config.ts vitest.s3.config.ts",
+    "format:check": "oxfmt --check src test .fallowrc.jsonc .oxlintrc.json .oxfmtrc.json package.json tsconfig.json vitest.config.ts vitest.s3.config.ts",
     "typecheck": "tsc --noEmit",
     "analyze": "fallow --type-aware",
     "analyze:check": "fallow --type-aware --fail-on-issues",
     "analyze:audit": "fallow audit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:s3": "node scripts/run-s3-tests.mjs",
+    "test:s3": "vitest run --config vitest.s3.config.ts",
     "check:remote": "npm run typecheck && npm run test:s3",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run test:coverage && npm run analyze:check",
     "prepublishOnly": "npm run check"
